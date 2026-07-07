@@ -1,0 +1,1828 @@
+{
+  "schema": "reaperai.reaper_api_inventory.v1",
+  "generated_at": "2026-07-03 22:48:56",
+  "portable": true,
+  "reaper_resource_path": "",
+  "api_count": 258,
+  "available_count": 258,
+  "missing_count": 2,
+  "sources": {
+    "reaper_api_whitelist.json": 258,
+    "reaper_api_candidates.json": 260,
+    "runtime_verified": 258
+  },
+  "apis": [
+    {
+      "name": "AddMediaItemToTrack",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "AddProjectMarker",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "AddProjectMarker2",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "AddTakeToMediaItem",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "BR_GetMediaTrackByGUID",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "BR_GetMidiSourceLenPPQ",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "BR_GetMouseCursorContext",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "BR_GetMouseCursorContext_MIDI",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "BR_GetMouseCursorContext_Position",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "BR_GetMouseCursorContext_Take",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ClearConsole",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ColorFromNative",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ColorToNative",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CountMediaItems",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CountProjectMarkers",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CountSelectedMediaItems",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CountSelectedTracks",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CountTakeEnvelopes",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CountTrackEnvelopes",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CountTrackMediaItems",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CountTracks",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CreateNewMIDIItemInProj",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "CreateTakeAudioAccessor",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "DeleteEnvelopePointRange",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "DeleteExtState",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "DeleteProjectMarker",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "DeleteTrack",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "DeleteTrackMediaItem",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "DestroyAudioAccessor",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "DockGetPosition",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "EnumProjectMarkers",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "EnumProjectMarkers3",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "EnumProjects",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "EnumerateSubdirectories",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Envelope_SortPoints",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GR_SelectColor",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetActiveTake",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetAppVersion",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetAudioAccessorSamples",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetCursorPosition",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetEnvelopeName",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetEnvelopeScalingMode",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetEnvelopeStateChunk",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetExtState",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetItemStateChunk",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetLastColorThemeFile",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMainHwnd",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaItem",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaItemInfo_Value",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaItemTake",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaItemTakeInfo_Value",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaItemTake_Item",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaItemTake_Source",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaItemTake_Track",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaItemTrack",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaSourceFileName",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaSourceLength",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaSourceNumChannels",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaSourceParent",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaSourceSampleRate",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaSourceType",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMediaTrackInfo_Value",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetMousePosition",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetNumTracks",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetOS",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetPlayPosition",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetPlayState",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetProjectLength",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetProjectPath",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetProjectStateChangeCount",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetProjectTimeSignature2",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetResourcePath",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSelectedEnvelope",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSelectedMediaItem",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSelectedTrack",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSetMediaItemTakeInfo_String",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSetMediaTrackInfo_String",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSetProjectGrid",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSetProjectInfo",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSetProjectInfo_String",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSet_LoopTimeRange",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetSet_LoopTimeRange2",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTakeEnvelope",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTakeEnvelopeByName",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTakeName",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetToggleCommandState",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetToggleCommandStateEx",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTrack",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTrackColor",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTrackEnvelope",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTrackEnvelopeByName",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTrackGUID",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTrackMIDILyrics",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTrackMediaItem",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTrackName",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetTrackNumSends",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetUserFileNameForRead",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "GetUserInputs",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "HasExtState",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Begin",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_BeginChild",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_BeginDisabled",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_BeginMenuBar",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Button",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Col_Button",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Col_ButtonActive",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Col_ButtonHovered",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Col_Text",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Cond_FirstUseEver",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_CreateContext",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_End",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_EndChild",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_EndDisabled",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_EndMenuBar",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_GetBuiltinPath",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_GetContentRegionAvail",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_GetCursorPosX",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Indent",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_InputText",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_InputTextFlags_Password",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_InputTextMultiline",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_IsKeyPressed",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Key_Enter",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_MenuItem",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_PopItemWidth",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_PopStyleColor",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_PopTextWrapPos",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_PushItemWidth",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_PushStyleColor",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_PushTextWrapPos",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_SameLine",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Separator",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_SetNextWindowSize",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_SetScrollHereY",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Spacing",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Text",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_TextColored",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_TextWrapped",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_Unindent",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ImGui_WindowFlags_MenuBar",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "InsertEnvelopePoint",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "InsertMedia",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "InsertTrackAtIndex",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "IsMediaItemSelected",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "IsTrackSelected",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_LICE_DestroyBitmap",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Localize",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Mouse_GetState",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Mouse_LoadCursor",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Mouse_LoadCursorFromFile",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Mouse_SetCursor",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_VKeys_GetDown",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_VKeys_GetState",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_VKeys_Intercept",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_WindowMessage_Intercept",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_WindowMessage_PassThrough",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_WindowMessage_Peek",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_WindowMessage_Release",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_WindowMessage_ReleaseWindow",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_Find",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_FindChildByID",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_FromPoint",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_GetClientRect",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_GetForeground",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_GetParent",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_GetTitle",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_ScreenToClient",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_SetFocus",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_SetForeground",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "JS_Window_Show",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "LocalizeString",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MB",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDIEditor_GetActive",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDIEditor_GetMode",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDIEditor_GetSetting_int",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDIEditor_GetTake",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDIEditor_OnCommand",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDI_GetAllEvts",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDI_GetGrid",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDI_GetPPQPosFromProjQN",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDI_GetPPQPosFromProjTime",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDI_GetPPQPos_StartOfMeasure",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDI_GetProjQNFromPPQPos",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDI_GetProjTimeFromPPQPos",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDI_SetAllEvts",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "MIDI_Sort",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Main_OnCommand",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Main_OnCommandEx",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Master_GetTempo",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "NamedCommandLookup",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "OnPlayButton",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "OnStopButton",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "OpenColorThemeFile",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "PCM_Sink_Enum",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "PCM_Sink_GetExtension",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "PCM_Source_GetSectionInfo",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "PreventUIRefresh",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "RecursiveCreateDirectory",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "RefreshToolbar2",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ReorderSelectedTracks",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SNM_GetIntConfigVar",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ScaleToEnvelopeMode",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SelectAllMediaItems",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetActiveTake",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetEditCurPos",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetEnvelopeStateChunk",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetExtState",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetItemStateChunk",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetMediaItemInfo_Value",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetMediaItemSelected",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetMediaItemTakeInfo_Value",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetMediaItemTake_Source",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetMediaTrackInfo_Value",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetOnlyTrackSelected",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetTrackSelected",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetProjectMarker",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetToggleCommandState",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetTrackColor",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SetTrackMIDILyrics",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ShowConsoleMsg",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ShowMessageBox",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SnapToGrid",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "SoloAllTracks",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TakeIsMIDI",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ThemeLayout_GetLayout",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ThemeLayout_GetParameter",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ThemeLayout_RefreshAll",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ThemeLayout_SetLayout",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ThemeLayout_SetParameter",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TimeMap2_beatsToTime",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TimeMap2_timeToBeats",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TimeMap_GetTimeSigAtTime",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TrackCtl_SetToolTip",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TrackFX_AddByName",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TrackFX_Delete",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TrackFX_GetCount",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TrackFX_GetFXName",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "TrackList_AdjustWindows",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Track_GetPeakInfo",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Undo_BeginBlock",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Undo_EndBlock",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Undo_OnStateChange",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Undo_OnStateChange2",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "Undo_OnStateChange_Item",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "UpdateArrange",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "UpdateItemInProject",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "UpdateTimeline",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ValidatePtr",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ValidatePtr2",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "ViewPrefs",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "atexit",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "defer",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "file_exists",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "genGuid",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "get_action_context",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "new_array",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "runloop",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    },
+    {
+      "name": "time_precise",
+      "source": "reaper_api_whitelist.json",
+      "available": true,
+      "verifier_strength": "runtime_verified"
+    }
+  ],
+  "available": [
+    "AddMediaItemToTrack",
+    "AddProjectMarker",
+    "AddProjectMarker2",
+    "AddTakeToMediaItem",
+    "BR_GetMediaTrackByGUID",
+    "BR_GetMidiSourceLenPPQ",
+    "BR_GetMouseCursorContext",
+    "BR_GetMouseCursorContext_MIDI",
+    "BR_GetMouseCursorContext_Position",
+    "BR_GetMouseCursorContext_Take",
+    "ClearConsole",
+    "ColorFromNative",
+    "ColorToNative",
+    "CountMediaItems",
+    "CountProjectMarkers",
+    "CountSelectedMediaItems",
+    "CountSelectedTracks",
+    "CountTakeEnvelopes",
+    "CountTrackEnvelopes",
+    "CountTrackMediaItems",
+    "CountTracks",
+    "CreateNewMIDIItemInProj",
+    "CreateTakeAudioAccessor",
+    "DeleteEnvelopePointRange",
+    "DeleteExtState",
+    "DeleteProjectMarker",
+    "DeleteTrack",
+    "DeleteTrackMediaItem",
+    "DestroyAudioAccessor",
+    "DockGetPosition",
+    "EnumProjectMarkers",
+    "EnumProjectMarkers3",
+    "EnumProjects",
+    "EnumerateSubdirectories",
+    "Envelope_SortPoints",
+    "GR_SelectColor",
+    "GetActiveTake",
+    "GetAppVersion",
+    "GetAudioAccessorSamples",
+    "GetCursorPosition",
+    "GetEnvelopeName",
+    "GetEnvelopeScalingMode",
+    "GetEnvelopeStateChunk",
+    "GetExtState",
+    "GetItemStateChunk",
+    "GetLastColorThemeFile",
+    "GetMainHwnd",
+    "GetMediaItem",
+    "GetMediaItemInfo_Value",
+    "GetMediaItemTake",
+    "GetMediaItemTakeInfo_Value",
+    "GetMediaItemTake_Item",
+    "GetMediaItemTake_Source",
+    "GetMediaItemTake_Track",
+    "GetMediaItemTrack",
+    "GetMediaSourceFileName",
+    "GetMediaSourceLength",
+    "GetMediaSourceNumChannels",
+    "GetMediaSourceParent",
+    "GetMediaSourceSampleRate",
+    "GetMediaSourceType",
+    "GetMediaTrackInfo_Value",
+    "GetMousePosition",
+    "GetNumTracks",
+    "GetOS",
+    "GetPlayPosition",
+    "GetPlayState",
+    "GetProjectLength",
+    "GetProjectPath",
+    "GetProjectStateChangeCount",
+    "GetProjectTimeSignature2",
+    "GetResourcePath",
+    "GetSelectedEnvelope",
+    "GetSelectedMediaItem",
+    "GetSelectedTrack",
+    "GetSetMediaItemTakeInfo_String",
+    "GetSetMediaTrackInfo_String",
+    "GetSetProjectGrid",
+    "GetSetProjectInfo",
+    "GetSetProjectInfo_String",
+    "GetSet_LoopTimeRange",
+    "GetSet_LoopTimeRange2",
+    "GetTakeEnvelope",
+    "GetTakeEnvelopeByName",
+    "GetTakeName",
+    "GetToggleCommandState",
+    "GetToggleCommandStateEx",
+    "GetTrack",
+    "GetTrackColor",
+    "GetTrackEnvelope",
+    "GetTrackEnvelopeByName",
+    "GetTrackGUID",
+    "GetTrackMIDILyrics",
+    "GetTrackMediaItem",
+    "GetTrackName",
+    "GetTrackNumSends",
+    "GetUserFileNameForRead",
+    "GetUserInputs",
+    "HasExtState",
+    "ImGui_Begin",
+    "ImGui_BeginChild",
+    "ImGui_BeginDisabled",
+    "ImGui_BeginMenuBar",
+    "ImGui_Button",
+    "ImGui_Col_Button",
+    "ImGui_Col_ButtonActive",
+    "ImGui_Col_ButtonHovered",
+    "ImGui_Col_Text",
+    "ImGui_Cond_FirstUseEver",
+    "ImGui_CreateContext",
+    "ImGui_End",
+    "ImGui_EndChild",
+    "ImGui_EndDisabled",
+    "ImGui_EndMenuBar",
+    "ImGui_GetBuiltinPath",
+    "ImGui_GetContentRegionAvail",
+    "ImGui_GetCursorPosX",
+    "ImGui_Indent",
+    "ImGui_InputText",
+    "ImGui_InputTextFlags_Password",
+    "ImGui_InputTextMultiline",
+    "ImGui_IsKeyPressed",
+    "ImGui_Key_Enter",
+    "ImGui_MenuItem",
+    "ImGui_PopItemWidth",
+    "ImGui_PopStyleColor",
+    "ImGui_PopTextWrapPos",
+    "ImGui_PushItemWidth",
+    "ImGui_PushStyleColor",
+    "ImGui_PushTextWrapPos",
+    "ImGui_SameLine",
+    "ImGui_Separator",
+    "ImGui_SetNextWindowSize",
+    "ImGui_SetScrollHereY",
+    "ImGui_Spacing",
+    "ImGui_Text",
+    "ImGui_TextColored",
+    "ImGui_TextWrapped",
+    "ImGui_Unindent",
+    "ImGui_WindowFlags_MenuBar",
+    "InsertEnvelopePoint",
+    "InsertMedia",
+    "InsertTrackAtIndex",
+    "IsMediaItemSelected",
+    "IsTrackSelected",
+    "JS_LICE_DestroyBitmap",
+    "JS_Localize",
+    "JS_Mouse_GetState",
+    "JS_Mouse_LoadCursor",
+    "JS_Mouse_LoadCursorFromFile",
+    "JS_Mouse_SetCursor",
+    "JS_VKeys_GetDown",
+    "JS_VKeys_GetState",
+    "JS_VKeys_Intercept",
+    "JS_WindowMessage_Intercept",
+    "JS_WindowMessage_PassThrough",
+    "JS_WindowMessage_Peek",
+    "JS_WindowMessage_Release",
+    "JS_WindowMessage_ReleaseWindow",
+    "JS_Window_Find",
+    "JS_Window_FindChildByID",
+    "JS_Window_FromPoint",
+    "JS_Window_GetClientRect",
+    "JS_Window_GetForeground",
+    "JS_Window_GetParent",
+    "JS_Window_GetTitle",
+    "JS_Window_ScreenToClient",
+    "JS_Window_SetFocus",
+    "JS_Window_SetForeground",
+    "JS_Window_Show",
+    "LocalizeString",
+    "MB",
+    "MIDIEditor_GetActive",
+    "MIDIEditor_GetMode",
+    "MIDIEditor_GetSetting_int",
+    "MIDIEditor_GetTake",
+    "MIDIEditor_OnCommand",
+    "MIDI_GetAllEvts",
+    "MIDI_GetGrid",
+    "MIDI_GetPPQPosFromProjQN",
+    "MIDI_GetPPQPosFromProjTime",
+    "MIDI_GetPPQPos_StartOfMeasure",
+    "MIDI_GetProjQNFromPPQPos",
+    "MIDI_GetProjTimeFromPPQPos",
+    "MIDI_SetAllEvts",
+    "MIDI_Sort",
+    "Main_OnCommand",
+    "Main_OnCommandEx",
+    "Master_GetTempo",
+    "NamedCommandLookup",
+    "OnPlayButton",
+    "OnStopButton",
+    "OpenColorThemeFile",
+    "PCM_Sink_Enum",
+    "PCM_Sink_GetExtension",
+    "PCM_Source_GetSectionInfo",
+    "PreventUIRefresh",
+    "RecursiveCreateDirectory",
+    "RefreshToolbar2",
+    "ReorderSelectedTracks",
+    "SNM_GetIntConfigVar",
+    "ScaleToEnvelopeMode",
+    "SelectAllMediaItems",
+    "SetActiveTake",
+    "SetEditCurPos",
+    "SetEnvelopeStateChunk",
+    "SetExtState",
+    "SetItemStateChunk",
+    "SetMediaItemInfo_Value",
+    "SetMediaItemSelected",
+    "SetMediaItemTakeInfo_Value",
+    "SetMediaItemTake_Source",
+    "SetMediaTrackInfo_Value",
+    "SetOnlyTrackSelected",
+    "SetTrackSelected",
+    "SetProjectMarker",
+    "SetToggleCommandState",
+    "SetTrackColor",
+    "SetTrackMIDILyrics",
+    "ShowConsoleMsg",
+    "ShowMessageBox",
+    "SnapToGrid",
+    "SoloAllTracks",
+    "TakeIsMIDI",
+    "ThemeLayout_GetLayout",
+    "ThemeLayout_GetParameter",
+    "ThemeLayout_RefreshAll",
+    "ThemeLayout_SetLayout",
+    "ThemeLayout_SetParameter",
+    "TimeMap2_beatsToTime",
+    "TimeMap2_timeToBeats",
+    "TimeMap_GetTimeSigAtTime",
+    "TrackCtl_SetToolTip",
+    "TrackFX_AddByName",
+    "TrackFX_Delete",
+    "TrackFX_GetCount",
+    "TrackFX_GetFXName",
+    "TrackList_AdjustWindows",
+    "Track_GetPeakInfo",
+    "Undo_BeginBlock",
+    "Undo_EndBlock",
+    "Undo_OnStateChange",
+    "Undo_OnStateChange2",
+    "Undo_OnStateChange_Item",
+    "UpdateArrange",
+    "UpdateItemInProject",
+    "UpdateTimeline",
+    "ValidatePtr",
+    "ValidatePtr2",
+    "ViewPrefs",
+    "atexit",
+    "defer",
+    "file_exists",
+    "genGuid",
+    "get_action_context",
+    "new_array",
+    "runloop",
+    "time_precise"
+  ],
+  "missing": [
+    "DeleteMediaItem",
+    "Sleep"
+  ]
+}

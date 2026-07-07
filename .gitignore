@@ -1,0 +1,31 @@
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# ReaperAI local runtime generated files
+MCP_Server/.venv/
+MCP_Server/venv/
+MCP_Server/python_runtime/
+MCP_Server/python_path.txt
+MCP_Server/pythonw_path.txt
+MCP_Server/mcp_server_*.log
+MCP_Server/mcp_server_status.json
+MCP_Server/mcp_server_endpoints.json
+MCP_Server/mcp_server_shutdown.json
+MCP_Server/*.tmp
+MCP_Server/*.bak
+
+# User/local configuration backups
+*.local
+*.local.*
+*.bak
+*.tmp
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

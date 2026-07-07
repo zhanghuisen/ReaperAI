@@ -1,0 +1,7 @@
+{
+  "_comment": "ReaperAI MCP 服务器配置文件",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765
+  }
+}

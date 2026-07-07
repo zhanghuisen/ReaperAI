@@ -1,0 +1,9 @@
+{
+  "_comment": "ReaperAI MCP Server 配置文件",
+  "reaper_projects_dir": ".",
+  "reaper_resource_path": "",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765
+  }
+}
