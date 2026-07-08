@@ -25,11 +25,18 @@ import time
 import traceback
 import subprocess
 import shutil
+import re
 
 RESPONSE_TIMEOUT = 90  # 秒
 TEMP_DIR = os.environ.get('TEMP', 'C:\\Temp')
 ELEVENLABS_TIMEOUT = 180  # 音频生成可能需要更长时间
 SFX_DURATION_SECONDS = 4.0  # 固定短音效时长，避免 Sound Effects 长时间排队
+VOICE_LIST_TIMEOUT = 30
+VOICE_PROBE_TIMEOUT = 8  # 刷新声线时的可用性探针超时
+VOICE_PROBE_TEXT = "test"
+MAX_VOICE_PROBES = 40
+ELEVENLABS_EXPRESSIVE_MODEL = "eleven_v3"
+ELEVENLABS_STABLE_MODEL = "eleven_multilingual_v2"
 
 # ============================================
 # v1.0+ ElevenLabs 免费语音库（内置，用户无需手动配置）
@@ -51,6 +58,24 @@ FREE_VOICES = [
     {"id": "ZQe5CZNOzWyzPSCn5a3c", "gender": "male", "tags": ["澳大利亚", "澳洲", "口音", "男声", "james", "australian", "accent"]},
     {"id": "zrHiDhphv9ZnVXBqCLhn", "gender": "female", "tags": ["澳大利亚", "澳洲", "口音", "女声", "mimi", "australian", "accent"]},
 ]
+
+FREE_VOICE_DISPLAY_NAMES = {
+    "21m00Tcm4TlvDq8ikWAM": "Rachel",
+    "AZnzlk1XvdvUeBnXmlld": "Domi",
+    "EXAVITQu4vr4xnSDxMaL": "Bella",
+    "MF3mGyEYCl7XYWbV9V6O": "Elli",
+    "piTKgcLEGmPE4e6mEKli": "Nicole",
+    "pFZP5JQG7iQjIQuC4Bku": "Lily",
+    "TxGEqnHWrfWFTfGW9XjX": "Josh",
+    "ErXwobaYiN019PkySvjV": "Antoni",
+    "VR6AewLTigWG4xSOukaG": "Arnold",
+    "pNInz6obpgDQGcFmaJgB": "Adam",
+    "yoZ06aMxZJJ28mfd3POQ": "Sam",
+    "ZQe5CZNOzWyzPSCn5a3c": "James",
+    "zrHiDhphv9ZnVXBqCLhn": "Mimi",
+}
+
+FREE_VOICE_IDS = {voice["id"] for voice in FREE_VOICES}
 
 # 日志函数（保留用于故障排查）
 def log(msg):
@@ -432,6 +457,7 @@ def extract_voice_preference(text):
         "播音", "新闻", "正式", "播报",
         "老年", "老人",
         "低沉", "轻声", "柔和", "大喊", "喊叫", "喊", "吼",
+        "愤怒", "生气", "怒吼", "紧急", "急促",
         "澳大利亚", "澳洲",
         "sweet", "gentle", "cute", "soft",
         "husky", "raspy", "rough", "powerful",
@@ -474,6 +500,7 @@ def extract_voice_preference(text):
             clean_text,
             flags=re.IGNORECASE,
         )
+        clean_text = re.sub(r"^\s*[地得的]\s*", "", clean_text)
         clean_text = clean_text.strip()
         
         return preference, clean_text if clean_text else text
@@ -487,6 +514,16 @@ def _voice_by_id(voice_id):
         if voice["id"] == voice_id:
             return voice
     return None
+
+
+def _voice_display_name(voice_id):
+    voice_id = str(voice_id or "").strip()
+    if not voice_id:
+        return ""
+    name = FREE_VOICE_DISPLAY_NAMES.get(voice_id)
+    if name:
+        return f"{name} ({voice_id})"
+    return voice_id
 
 
 def _voice_matches_gender(voice, gender):
@@ -542,6 +579,13 @@ def _expanded_voice_preference(preference):
         "粗糙": "粗犷 rough",
         "甜美": "甜蜜 sweet",
         "柔": "温柔 gentle soft",
+        "大喊": "喊叫 shout shouting loud powerful urgent",
+        "喊叫": "shout shouting loud powerful urgent",
+        "喊": "shout shouting loud powerful urgent",
+        "吼": "yell shouting loud powerful angry",
+        "shout": "shouting loud powerful urgent",
+        "yell": "shouting loud powerful urgent",
+        "scream": "shouting loud powerful intense",
     }
     expanded = [pref_lower]
     for word, extra in synonyms.items():
@@ -682,6 +726,214 @@ def _infer_gender_from_text(text):
     return ""
 
 
+def _safe_voice_field(value):
+    return str(value or "").replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+
+
+def _safe_output_dir(output_dir):
+    output_dir = str(output_dir or "").strip().strip('"').strip("'")
+    if not output_dir:
+        return TEMP_DIR
+    return os.path.abspath(output_dir)
+
+
+def _audio_timestamp():
+    return time.strftime("%Y%m%d_%H%M%S") + f"_{int((time.time() % 1) * 1000):03d}"
+
+
+def _free_voice_record(voice, available=False):
+    voice_id = voice.get("id") or ""
+    return {
+        "id": voice_id,
+        "name": FREE_VOICE_DISPLAY_NAMES.get(voice_id, voice_id),
+        "gender": voice.get("gender") or "",
+        "free": True,
+        "source": "free",
+        "available": bool(available),
+        "tags": list(voice.get("tags") or []),
+    }
+
+
+def _voice_record_line(record):
+    tags = ",".join(_safe_voice_field(tag) for tag in record.get("tags") or [])
+    return "\t".join([
+        _safe_voice_field(record.get("id")),
+        _safe_voice_field(record.get("name")),
+        _safe_voice_field(record.get("gender")),
+        "1" if record.get("free") else "0",
+        _safe_voice_field(record.get("source") or ("free" if record.get("free") else "account")),
+        tags,
+        "1" if record.get("available") else "0",
+    ])
+
+
+def _labels_text(labels):
+    if isinstance(labels, dict):
+        return " ".join(str(v) for v in labels.values() if v is not None)
+    if isinstance(labels, list):
+        return " ".join(str(v) for v in labels if v is not None)
+    return str(labels or "")
+
+
+def _infer_voice_gender_from_record(raw):
+    labels = raw.get("labels") if isinstance(raw, dict) else None
+    pieces = [
+        raw.get("name", "") if isinstance(raw, dict) else "",
+        raw.get("category", "") if isinstance(raw, dict) else "",
+        raw.get("description", "") if isinstance(raw, dict) else "",
+        _labels_text(labels),
+    ]
+    gender = _infer_gender_from_text(" ".join(pieces))
+    if gender:
+        return gender
+    if isinstance(labels, dict):
+        for key in ("gender", "Gender", "sex", "voice_gender"):
+            label_value = str(labels.get(key) or "").lower()
+            if label_value in ("male", "man", "m"):
+                return "male"
+            if label_value in ("female", "woman", "f"):
+                return "female"
+    return "unknown"
+
+
+def _account_voice_record(raw):
+    if not isinstance(raw, dict):
+        return None
+    voice_id = str(raw.get("voice_id") or raw.get("id") or "").strip()
+    if not voice_id:
+        return None
+    name = str(raw.get("name") or FREE_VOICE_DISPLAY_NAMES.get(voice_id) or voice_id).strip()
+    labels = raw.get("labels") if isinstance(raw.get("labels"), dict) else {}
+    tags = []
+    for value in labels.values():
+        value = str(value or "").strip()
+        if value:
+            tags.append(value)
+    category = str(raw.get("category") or "").strip()
+    if category:
+        tags.append(category)
+    return {
+        "id": voice_id,
+        "name": name,
+        "gender": _infer_voice_gender_from_record(raw),
+        "free": voice_id in FREE_VOICE_IDS,
+        "source": "free" if voice_id in FREE_VOICE_IDS else "account",
+        "available": True,
+        "tags": tags,
+    }
+
+
+def _probe_voice_available(api_key, voice_id):
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": api_key,
+    }
+    payload = {
+        "text": VOICE_PROBE_TEXT,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+        },
+    }
+    try:
+        response = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers=headers,
+            json=payload,
+            timeout=VOICE_PROBE_TIMEOUT,
+        )
+        if response.status_code == 200:
+            return True, ""
+        detail = response.text[:200] if len(response.text) > 200 else response.text
+        return False, f"{response.status_code}: {detail}"
+    except requests.exceptions.Timeout:
+        return False, f"timeout {VOICE_PROBE_TIMEOUT}s"
+    except requests.exceptions.RequestException as e:
+        return False, str(e)
+    except Exception as e:
+        return False, str(e)
+
+
+def make_elevenlabs_voices_request(api_key):
+    if not api_key:
+        return {"success": False, "error": "请先填写 ElevenLabs Key"}
+
+    candidates = [_free_voice_record(voice, available=False) for voice in FREE_VOICES]
+    record_by_id = {record["id"]: record for record in candidates}
+    seen = set(record_by_id.keys())
+
+    headers = {"Accept": "application/json", "xi-api-key": api_key}
+    try:
+        response = requests.get("https://api.elevenlabs.io/v1/voices", headers=headers, timeout=VOICE_LIST_TIMEOUT)
+        if response.status_code != 200:
+            detail = response.text[:300] if len(response.text) > 300 else response.text
+            return {"success": False, "error": f"ElevenLabs Key 或声线接口不可用 ({response.status_code}): {detail}"}
+
+        data = response.json()
+        raw_voices = data.get("voices") if isinstance(data, dict) else data
+        if not isinstance(raw_voices, list):
+            return {"success": False, "error": "ElevenLabs 声线接口响应格式异常"}
+
+        skipped_unknown_gender = 0
+        for raw in raw_voices:
+            record = _account_voice_record(raw)
+            if not record:
+                continue
+            if record["id"] in seen:
+                existing = record_by_id.get(record["id"])
+                if existing:
+                    existing["available"] = True
+                    existing["name"] = record.get("name") or existing.get("name")
+                    existing["source"] = record.get("source") or existing.get("source")
+                    if record.get("tags"):
+                        existing["tags"] = record.get("tags")
+                continue
+            if record.get("gender") not in ("male", "female"):
+                skipped_unknown_gender += 1
+                continue
+            seen.add(record["id"])
+            record_by_id[record["id"]] = record
+            candidates.append(record)
+
+        usable = []
+        last_error = ""
+        for record in candidates[:MAX_VOICE_PROBES]:
+            ok, probe_error = _probe_voice_available(api_key, record["id"])
+            if ok:
+                record["available"] = True
+                usable.append(record)
+            else:
+                last_error = probe_error
+                log(f"Voice probe failed {record['id']}: {probe_error}")
+
+        skipped_by_limit = max(0, len(candidates) - MAX_VOICE_PROBES)
+        if not usable:
+            suffix = f" 最后错误: {last_error}" if last_error else ""
+            return {"success": False, "error": "没有检测到可用声线。" + suffix}
+
+        message = f"已检测到 {len(usable)} 条可用声线"
+        if skipped_unknown_gender:
+            message += f"，忽略 {skipped_unknown_gender} 条未标性别声线"
+        if skipped_by_limit:
+            message += f"，还有 {skipped_by_limit} 条未检测"
+        return {
+            "success": True,
+            "content": "\n".join(_voice_record_line(record) for record in usable),
+            "count": len(usable),
+            "fallback": False,
+            "message": message,
+        }
+
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "ElevenLabs 声线接口超时"}
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "error": f"ElevenLabs 声线接口网络错误: {e}"}
+    except Exception as e:
+        return {"success": False, "error": f"ElevenLabs 声线检测失败: {e}"}
+
+
 def _has_chinese(text):
     for c in text or "":
         if '\u4e00' <= c <= '\u9fff':
@@ -725,7 +977,14 @@ Schema:
 {
   "spoken_text": "the exact words ElevenLabs should speak",
   "gender": "male|female|",
-  "voice_style": "short voice/performance description",
+  "voice_style": "voice identity/timbre/accent only, such as deep, young, old, husky",
+  "performance_prompt": "open acting direction, preserving nuanced user intent",
+  "emotion": "optional primary emotion",
+  "intensity": 0.0,
+  "pace": "slow|normal|fast|",
+  "volume": "soft|normal|loud|",
+  "delivery": "optional delivery style",
+  "audio_tags": ["optional short ElevenLabs-style tags"],
   "track_name": ""
 }
 
@@ -733,7 +992,11 @@ Rules:
 - Understand Chinese and English natural language.
 - Do not include instruction words such as 男生, 女声, 大喊, say, read, 用...说 in spoken_text.
 - Preserve the language of the words that should be spoken. Do not translate spoken_text unless the user explicitly asks for translation.
-- Put acting directions such as 大喊, whispering, angry, urgent, calm into voice_style, not spoken_text.
+- Put acting directions such as 大喊, whispering, angry, urgent, calm, seductive, near tears, sarcastic, terrified into performance_prompt, not spoken_text.
+- Keep voice_style for voice selection only. Do not flatten performance_prompt into a small enum.
+- performance_prompt may be detailed, e.g. "terrified battlefield shout, loud projection, urgent, panicked, short and explosive".
+- audio_tags should be short natural tags like "shouting", "whispering", "laughing", "sighing", "crying", "sarcastic", "seductive" when useful.
+- intensity is a number from 0 to 1. Use 0.5 when unclear.
 - If the user clearly asks for a male voice, gender is male. If clearly female, gender is female. Otherwise use empty string.
 - track_name should usually be empty unless the user explicitly names the track."""
 
@@ -742,6 +1005,7 @@ Rules:
         "spoken_text": fallback_req.get("spoken_text") or "",
         "gender": fallback_req.get("gender") or "",
         "voice_style": fallback_req.get("voice_style") or "",
+        "performance_prompt": fallback_req.get("performance_prompt") or fallback_req.get("performance") or "",
     }
     user_prompt = f"""User 11vox request:
 {user_text}
@@ -751,13 +1015,13 @@ Current rough parse:
 
 Examples:
 Input: 11vox 男生大喊 fire in the hole
-Output: {{"spoken_text":"fire in the hole","gender":"male","voice_style":"shouting, urgent","track_name":""}}
+Output: {{"spoken_text":"fire in the hole","gender":"male","voice_style":"","performance_prompt":"terrified battlefield shout, loud projection, urgent, high intensity","emotion":"panic","intensity":0.95,"pace":"fast","volume":"loud","delivery":"shouted","audio_tags":["shouting","panicked"],"track_name":""}}
 
 Input: 11vox 女声温柔说 欢迎回来
-Output: {{"spoken_text":"欢迎回来","gender":"female","voice_style":"gentle, warm","track_name":""}}
+Output: {{"spoken_text":"欢迎回来","gender":"female","voice_style":"","performance_prompt":"gentle, warm, intimate, soft delivery","emotion":"warm","intensity":0.35,"pace":"slow","volume":"soft","delivery":"gentle","audio_tags":["gentle"],"track_name":""}}
 
 Input: 11vox 用老人大声喊 Run!
-Output: {{"spoken_text":"Run!","gender":"male","voice_style":"elderly, loud, shouting","track_name":""}}
+Output: {{"spoken_text":"Run!","gender":"male","voice_style":"elderly","performance_prompt":"loud urgent shout, forceful projection","emotion":"urgent","intensity":0.9,"pace":"fast","volume":"loud","delivery":"shouted","audio_tags":["shouting"],"track_name":""}}
 
 Now output JSON for the user request."""
 
@@ -782,14 +1046,25 @@ Now output JSON for the user request."""
         gender = ""
 
     voice_style = _trim_audio_text(data.get("voice_style") or data.get("style") or "")
-    performance = _trim_audio_text(data.get("performance") or "")
-    if performance and performance.lower() not in voice_style.lower():
-        voice_style = (voice_style + ", " + performance).strip(" ,")
+    performance_prompt = _trim_audio_text(
+        data.get("performance_prompt")
+        or data.get("performance")
+        or data.get("tone")
+        or data.get("emotion")
+        or ""
+    )
 
     return {
         "spoken_text": spoken_text,
         "gender": gender,
         "voice_style": voice_style,
+        "performance_prompt": performance_prompt,
+        "emotion": _trim_audio_text(data.get("emotion") or ""),
+        "intensity": data.get("intensity"),
+        "pace": _trim_audio_text(data.get("pace") or ""),
+        "volume": _trim_audio_text(data.get("volume") or ""),
+        "delivery": _trim_audio_text(data.get("delivery") or ""),
+        "audio_tags": data.get("audio_tags") if isinstance(data.get("audio_tags"), list) else [],
         "track_name": _trim_audio_text(data.get("track_name") or ""),
     }
 
@@ -813,9 +1088,11 @@ def parse_audio_request_payload(raw_text):
                     mode = "sfx"
 
                 voice_style = _trim_audio_text(data.get("voice_style") or data.get("style") or "")
+                performance = _trim_audio_text(data.get("performance") or data.get("tone") or data.get("emotion") or "")
+                performance_prompt = _trim_audio_text(data.get("performance_prompt") or performance)
                 gender = str(data.get("gender") or "").strip().lower()
                 if gender not in ("male", "female"):
-                    gender = _infer_gender_from_text(voice_style)
+                    gender = _infer_gender_from_text(" ".join([voice_style, performance_prompt]))
 
                 return {
                     "structured": True,
@@ -824,8 +1101,18 @@ def parse_audio_request_payload(raw_text):
                     "prompt": _trim_audio_text(data.get("prompt") or data.get("description") or ""),
                     "gender": gender,
                     "voice_style": voice_style,
+                    "performance": performance,
+                    "performance_prompt": performance_prompt,
+                    "emotion": _trim_audio_text(data.get("emotion") or ""),
+                    "intensity": data.get("intensity"),
+                    "pace": _trim_audio_text(data.get("pace") or ""),
+                    "volume": _trim_audio_text(data.get("volume") or ""),
+                    "delivery": _trim_audio_text(data.get("delivery") or ""),
+                    "audio_tags": data.get("audio_tags") if isinstance(data.get("audio_tags"), list) else [],
+                    "voice_id": _trim_audio_text(data.get("voice_id") or data.get("voice") or ""),
                     "spoken_text": _trim_audio_text(data.get("spoken_text") or data.get("text") or ""),
                     "source_text": _trim_audio_text(data.get("source_text") or ""),
+                    "output_dir": _trim_audio_text(data.get("output_dir") or ""),
                     "semantic_parse": bool(data.get("semantic_parse")),
                 }
         except Exception as e:
@@ -853,8 +1140,18 @@ def parse_audio_request_payload(raw_text):
             "prompt": "",
             "gender": gender,
             "voice_style": voice_style,
+            "performance": "",
+            "performance_prompt": voice_style,
+            "emotion": "",
+            "intensity": None,
+            "pace": "",
+            "volume": "",
+            "delivery": "",
+            "audio_tags": [],
+            "voice_id": "",
             "spoken_text": spoken_text,
             "source_text": text,
+            "output_dir": "",
             "semantic_parse": bool(explicit_vox),
         }
 
@@ -865,8 +1162,18 @@ def parse_audio_request_payload(raw_text):
         "prompt": text,
         "gender": "",
         "voice_style": "",
+        "performance": "",
+        "performance_prompt": "",
+        "emotion": "",
+        "intensity": None,
+        "pace": "",
+        "volume": "",
+        "delivery": "",
+        "audio_tags": [],
+        "voice_id": "",
         "spoken_text": "",
         "source_text": text,
+        "output_dir": "",
         "semantic_parse": False,
     }
 
@@ -911,31 +1218,228 @@ Only output the English prompt, nothing else. No quotes, no explanations."""
         return None, result.get("error", "翻译失败")
 
 
-def _do_tts_request(api_key, text, voice_id):
-    """内部：执行单次 TTS 请求，返回 response 对象"""
+def _infer_tts_performance(style_text):
+    lower = (style_text or "").lower()
+    if any(w in lower for w in ["大喊", "喊叫", "吼", "怒吼", "shout", "shouting", "yell", "yelling", "scream", "loud"]):
+        return "loud urgent shouting"
+    if any(w in lower for w in ["愤怒", "生气", "angry", "furious", "rage"]):
+        return "angry"
+    if any(w in lower for w in ["紧急", "急促", "urgent", "panic", "panicked"]):
+        return "urgent panicked"
+    if any(w in lower for w in ["轻声", "耳语", "悄声", "whisper", "whispering"]):
+        return "whispering"
+    if any(w in lower for w in ["温柔", "柔和", "gentle", "soft", "warm"]):
+        return "gentle warm"
+    return ""
+
+
+def _is_plain_latin_text(text):
+    return bool(re.match(r"^[A-Za-z0-9\s\-_,.'!?]+$", text or ""))
+
+
+def _clamp_float(value, default=0.5, low=0.0, high=1.0):
+    try:
+        value = float(value)
+    except Exception:
+        value = default
+    return max(low, min(high, value))
+
+
+def _contains_any(text, words):
+    text = (text or "").lower()
+    return any(word in text for word in words)
+
+
+def _sanitize_audio_tag(tag):
+    tag = str(tag or "").strip()
+    tag = re.sub(r"[\[\]\r\n]+", " ", tag)
+    tag = re.sub(r"\s+", " ", tag).strip(" ,.;:，。；：")
+    return tag[:48] if tag else ""
+
+
+def _dedupe_tags(tags, limit=5):
+    out = []
+    seen = set()
+    for tag in tags:
+        clean = _sanitize_audio_tag(tag)
+        key = clean.lower()
+        if clean and key not in seen:
+            seen.add(key)
+            out.append(clean)
+        if len(out) >= limit:
+            break
+    return out
+
+
+PERFORMANCE_CUE_SPECS = [
+    ("shouting", ["大喊", "喊叫", "喊", "吼", "怒吼", "咆哮", "shout", "shouting", "yell", "yelling", "scream", "loud"], "loud", "fast", 0.88),
+    ("whispering", ["低语", "耳语", "轻声", "悄声", "小声", "whisper", "whispering", "hushed"], "soft", "slow", 0.42),
+    ("panicked", ["恐慌", "惊慌", "慌张", "害怕", "恐惧", "快崩溃", "panic", "panicked", "terrified", "fearful", "scared"], "", "fast", 0.82),
+    ("angry", ["愤怒", "生气", "压着火", "火气", "怒", "暴怒", "angry", "furious", "rage", "irritated"], "", "", 0.78),
+    ("urgent", ["紧急", "急促", "着急", "赶时间", "urgent", "rushed", "hurry", "fast"], "", "fast", 0.75),
+    ("gentle", ["温柔", "柔和", "柔软", "暖", "gentle", "soft", "warm", "tender"], "soft", "slow", 0.34),
+    ("sad", ["悲伤", "难过", "哀伤", "失落", "sad", "sorrow", "grief", "heartbroken"], "", "slow", 0.52),
+    ("crying", ["哭", "哭腔", "哽咽", "快哭", "泪", "cry", "crying", "tearful", "sobbing", "near tears"], "", "slow", 0.68),
+    ("excited", ["兴奋", "激动", "亢奋", "excited", "thrilled", "hyped"], "", "fast", 0.76),
+    ("happy", ["开心", "快乐", "高兴", "愉快", "happy", "joyful", "cheerful"], "", "", 0.55),
+    ("laughing", ["笑", "嘲笑", "冷笑", "轻笑", "laugh", "laughing", "giggle", "chuckle"], "", "", 0.55),
+    ("sarcastic", ["讽刺", "阴阳怪气", "嘲讽", "挖苦", "sarcastic", "mocking", "snarky"], "", "", 0.58),
+    ("seductive", ["性感", "暧昧", "挑逗", "撩", "色情", "情欲", "欲望", "亲密", "诱惑", "seductive", "sensual", "flirty", "intimate", "erotic", "breathy"], "soft", "slow", 0.62),
+    ("breathy", ["气声", "呼吸感", "喘息", "breathy", "breathless"], "soft", "", 0.55),
+    ("tired", ["疲惫", "累", "虚弱", "tired", "exhausted", "weary", "weak"], "soft", "slow", 0.36),
+    ("cold", ["冷漠", "冰冷", "冷淡", "cold", "detached", "emotionless"], "", "", 0.32),
+    ("serious", ["严肃", "认真", "庄重", "serious", "stern", "grave"], "", "", 0.45),
+    ("commanding", ["命令", "压迫", "威严", "commanding", "authoritative", "dominant"], "loud", "", 0.72),
+    ("surprised", ["惊讶", "震惊", "吓一跳", "surprised", "shocked", "startled"], "", "", 0.68),
+    ("nervous", ["紧张", "不安", "结巴", "nervous", "anxious", "hesitant"], "", "fast", 0.58),
+    ("ominous", ["阴森", "恐怖", "诡异", "邪恶", "ominous", "creepy", "sinister", "evil"], "", "slow", 0.62),
+    ("unhinged", ["疯狂", "疯批", "癫狂", "疯", "mad", "crazy", "unhinged", "manic"], "", "", 0.82),
+    ("announcer", ["播报", "播音", "新闻", "旁白", "announcer", "narrator", "newsreader"], "", "", 0.38),
+]
+
+
+def _compile_tts_performance(text, performance_prompt="", voice_style="", data=None):
+    data = data or {}
+    prompt_parts = [
+        performance_prompt,
+        data.get("performance_prompt"),
+        data.get("performance"),
+        data.get("emotion"),
+        data.get("delivery"),
+        data.get("pace"),
+        data.get("volume"),
+    ]
+    clean_prompt_parts = []
+    seen_prompt_parts = set()
+    for part in prompt_parts:
+        clean_part = _trim_audio_text(part)
+        key = clean_part.lower()
+        if clean_part and key not in seen_prompt_parts:
+            seen_prompt_parts.add(key)
+            clean_prompt_parts.append(clean_part)
+    prompt = " ".join(clean_prompt_parts)
+    voice_style = _trim_audio_text(voice_style)
+    blob = " ".join([prompt, voice_style]).lower()
+
+    tags = list(data.get("audio_tags") or [])
+    inferred_intensity = 0.5
+    pace = _trim_audio_text(data.get("pace") or "")
+    volume = _trim_audio_text(data.get("volume") or "")
+
+    for tag, words, cue_volume, cue_pace, cue_intensity in PERFORMANCE_CUE_SPECS:
+        if _contains_any(blob, words):
+            tags.append(tag)
+            inferred_intensity = max(inferred_intensity, cue_intensity)
+            volume = volume or cue_volume
+            pace = pace or cue_pace
+
+    if prompt and not tags:
+        tags.append(prompt if len(prompt) <= 48 else prompt[:48].rsplit(" ", 1)[0])
+
+    tags = _dedupe_tags(tags)
+    intensity = _clamp_float(data.get("intensity"), inferred_intensity)
+    pace_l = pace.lower()
+    volume_l = volume.lower()
+    loud = volume_l in ("loud", "high", "大声") or any(t in ("shouting", "commanding") for t in tags)
+    soft = volume_l in ("soft", "quiet", "低声", "小声") or any(t in ("whispering", "gentle", "seductive", "breathy", "tired") for t in tags)
+    fast = pace_l in ("fast", "quick", "急促", "快速") or any(t in ("urgent", "panicked", "excited", "nervous") for t in tags)
+    slow = pace_l in ("slow", "慢", "缓慢") or any(t in ("whispering", "gentle", "sad", "crying", "seductive", "ominous", "tired") for t in tags)
+
+    settings = {"stability": 0.5, "similarity_boost": 0.75}
+    if tags:
+        settings["stability"] = round(max(0.18, min(0.72, 0.62 - intensity * 0.38)), 2)
+        settings["style"] = round(max(0.25, min(0.95, 0.25 + intensity * 0.72)), 2)
+        settings["use_speaker_boost"] = not soft
+    if loud:
+        settings["stability"] = min(settings.get("stability", 0.5), 0.28)
+        settings["style"] = max(settings.get("style", 0.6), 0.82)
+        settings["use_speaker_boost"] = True
+    if soft:
+        settings["stability"] = min(settings.get("stability", 0.5), 0.42)
+        settings["style"] = max(settings.get("style", 0.35), 0.55)
+        settings["use_speaker_boost"] = False
+    if fast and not slow:
+        settings["speed"] = 1.12
+    elif slow and not fast:
+        settings["speed"] = 0.86
+
+    stable_text = (text or "").strip()
+    if loud or any(t in ("angry", "urgent", "panicked", "excited", "commanding", "unhinged") for t in tags):
+        if _is_plain_latin_text(stable_text):
+            stable_text = stable_text.upper()
+        if stable_text and not stable_text.endswith(("!", "！", "?")):
+            stable_text = stable_text.rstrip(".。") + ("!!" if intensity >= 0.85 else "!")
+    elif any(t in ("sad", "crying", "tired", "ominous") for t in tags):
+        if stable_text and not stable_text.endswith(("...", "…", ".", "。", "!", "！", "?")):
+            stable_text = stable_text + "..."
+    elif soft:
+        stable_text = stable_text.rstrip("!！")
+
+    expressive_text = stable_text
+    if tags:
+        expressive_text = " ".join(f"[{tag}]" for tag in tags) + " " + stable_text
+
+    return {
+        "prompt": prompt,
+        "tags": tags,
+        "intensity": intensity,
+        "pace": pace,
+        "volume": volume,
+        "text": expressive_text,
+        "stable_text": stable_text,
+        "voice_settings": settings,
+        "model_id": ELEVENLABS_EXPRESSIVE_MODEL if tags else ELEVENLABS_STABLE_MODEL,
+        "summary": ", ".join(tags) if tags else (prompt or "默认"),
+    }
+
+
+def _performance_text_for_tts(text, performance):
+    return _compile_tts_performance(text, performance)["text"]
+
+
+def _voice_settings_for_performance(performance):
+    return _compile_tts_performance("", performance)["voice_settings"]
+
+
+def _tts_payload(compiled, stable_model=False):
+    return {
+        "text": compiled["stable_text"] if stable_model else compiled["text"],
+        "model_id": ELEVENLABS_STABLE_MODEL if stable_model else compiled["model_id"],
+        "voice_settings": compiled["voice_settings"],
+    }
+
+
+def _post_tts_request(api_key, voice_id, payload):
     headers = {
         "Accept": "audio/mpeg",
         "Content-Type": "application/json",
         "xi-api-key": api_key
     }
-    payload = {
-        "text": text,
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75
-        }
-    }
-    response = requests.post(
+    return requests.post(
         f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
         headers=headers,
         json=payload,
         timeout=ELEVENLABS_TIMEOUT
     )
+
+
+def _do_tts_request(api_key, text, voice_id, performance=""):
+    """内部：执行单次 TTS 请求。开放表演走 v3；模型/权限不支持时回落 v2。"""
+    compiled = performance if isinstance(performance, dict) else _compile_tts_performance(text, performance)
+    response = _post_tts_request(api_key, voice_id, _tts_payload(compiled, stable_model=False))
+    if response.status_code == 200:
+        return response
+    if compiled.get("model_id") != ELEVENLABS_STABLE_MODEL and response.status_code in (400, 401, 402, 403, 422):
+        detail = response.text[:200] if len(response.text) > 200 else response.text
+        log(f"Expressive TTS model fallback for voice {voice_id}: {response.status_code} {detail}")
+        fallback_response = _post_tts_request(api_key, voice_id, _tts_payload(compiled, stable_model=True))
+        if fallback_response.status_code == 200:
+            return fallback_response
+        return fallback_response
     return response
 
 
-def make_elevenlabs_tts_request(api_key, text, voice_id, output_dir=None, preferred_gender=""):
+def make_elevenlabs_tts_request(api_key, text, voice_id, output_dir=None, preferred_gender="", performance="", voice_style="", performance_data=None):
     """调用 ElevenLabs TTS API 生成语音
     
     v1.0+ 新增：
@@ -943,26 +1447,26 @@ def make_elevenlabs_tts_request(api_key, text, voice_id, output_dir=None, prefer
     - 402 自动 fallback：遇到付费限制时尝试同一性别的其他免费 voice
     - 显式选择男/女后不跨性别降级，避免男声请求生成女声
     """
-    if not output_dir:
-        output_dir = TEMP_DIR
+    output_dir = _safe_output_dir(output_dir)
     
     os.makedirs(output_dir, exist_ok=True)
-    timestamp = int(time.time())
+    timestamp = _audio_timestamp()
     temp_mp3 = os.path.join(output_dir, f"elevenlabs_tts_{timestamp}.mp3")
     output_wav = os.path.join(output_dir, f"elevenlabs_tts_{timestamp}.wav")
     
     # 构建尝试列表：首选 voice 放第一个；显式性别只在同一性别池内兜底。
     voices_to_try = _build_voice_try_list(voice_id, preferred_gender)
     if not voices_to_try:
-        return {"success": False, "error": f"没有可用的{_gender_label(preferred_gender)}免费声线"}
+        return {"success": False, "error": f"没有可用的{_gender_label(preferred_gender)}声线"}
     
+    compiled_performance = _compile_tts_performance(text, performance, voice_style, performance_data)
     last_error = None
     tried_voices = []
     
     for vid in voices_to_try:
         tried_voices.append(vid)
         try:
-            response = _do_tts_request(api_key, text, vid)
+            response = _do_tts_request(api_key, text, vid, compiled_performance)
             
             if response.status_code == 200:
                 # 成功
@@ -980,7 +1484,9 @@ def make_elevenlabs_tts_request(api_key, text, voice_id, output_dir=None, prefer
                 
                 # 如果被降级了，在结果中备注（第一行提示，第二行路径）
                 if vid != voice_id:
-                    return {"success": True, "content": f"[所选语音不可用，已自动改用{_gender_label(preferred_gender)}免费相似声线]\n{output_wav}"}
+                    fallback_label = _voice_display_name(vid)
+                    selected_label = _voice_display_name(voice_id)
+                    return {"success": True, "content": f"[所选声线暂时不可用: {selected_label}；已改用: {fallback_label}]\n{output_wav}"}
                 return {"success": True, "content": output_wav}
             
             elif response.status_code == 402:
@@ -1015,7 +1521,7 @@ def make_elevenlabs_tts_request(api_key, text, voice_id, output_dir=None, prefer
             continue
     
     # 所有 voice 都试过了
-    return {"success": False, "error": f"所有{_gender_label(preferred_gender)}免费声线均不可用。最后一次错误: {last_error}"}
+    return {"success": False, "error": f"所有{_gender_label(preferred_gender)}声线均不可用。最后一次错误: {last_error}"}
 
 
 def make_elevenlabs_sound_request(api_key, text, output_dir=None):
@@ -1023,11 +1529,10 @@ def make_elevenlabs_sound_request(api_key, text, output_dir=None):
     
     v1.0+ 新增：根据文本描述生成音效（爆炸声、脚步声等）
     """
-    if not output_dir:
-        output_dir = TEMP_DIR
+    output_dir = _safe_output_dir(output_dir)
     
     os.makedirs(output_dir, exist_ok=True)
-    timestamp = int(time.time())
+    timestamp = _audio_timestamp()
     temp_mp3 = os.path.join(output_dir, f"elevenlabs_sfx_{timestamp}.mp3")
     output_wav = os.path.join(output_dir, f"elevenlabs_sfx_{timestamp}.wav")
     
@@ -1158,15 +1663,6 @@ def convert_to_wav(input_path, output_path, ffmpeg_path=None):
         return False, f"FFmpeg 转换异常: {str(e)}"
 
 
-def make_elevenlabs_request(api_key, text, output_dir=None):
-    """[已废弃] v1.0 旧版 ElevenLabs API 调用
-    
-    v1.0+ 请直接使用 make_elevenlabs_tts_request 或 make_elevenlabs_sound_request
-    为兼容保留，默认使用免费语音 Rachel
-    """
-    return make_elevenlabs_tts_request(api_key, text, "21m00Tcm4TlvDq8ikWAM", output_dir)
-
-
 def write_response(resp_file, signal_file, result):
     """写入响应文件并创建信号
     
@@ -1232,6 +1728,11 @@ def main():
     except Exception as e:
         emergency_log(f"创建临时目录失败: {e}")
     
+    if mode == "elevenlabs_voices":
+        result = make_elevenlabs_voices_request(api_key)
+        write_response(resp_file, signal_file, result)
+        return
+
     if mode == "models":
         result = make_models_request(api_url, api_key)
         write_response(resp_file, signal_file, result)
@@ -1274,6 +1775,7 @@ def main():
             llm_url = config.get("llm_url")
             llm_key = config.get("llm_key")
             llm_model = config.get("llm_model")
+            output_dir = _safe_output_dir(audio_req.get("output_dir"))
 
             if audio_req.get("semantic_parse"):
                 source_for_parse = audio_req.get("source_text") or audio_req.get("spoken_text") or ""
@@ -1282,12 +1784,18 @@ def main():
                     audio_req["spoken_text"] = parsed_vox.get("spoken_text") or audio_req.get("spoken_text") or ""
                     audio_req["gender"] = parsed_vox.get("gender") or audio_req.get("gender") or ""
                     audio_req["voice_style"] = parsed_vox.get("voice_style") or audio_req.get("voice_style") or ""
+                    audio_req["performance_prompt"] = parsed_vox.get("performance_prompt") or audio_req.get("performance_prompt") or audio_req.get("performance") or ""
+                    audio_req["performance"] = audio_req.get("performance_prompt") or audio_req.get("performance") or ""
+                    for key in ("emotion", "intensity", "pace", "volume", "delivery", "audio_tags"):
+                        if parsed_vox.get(key) not in (None, "", []):
+                            audio_req[key] = parsed_vox.get(key)
                     if parsed_vox.get("track_name") and not audio_req.get("track_name"):
                         audio_req["track_name"] = parsed_vox.get("track_name")
                     log(
                         "VOX 语义抽取: "
                         f"source='{source_for_parse}', spoken='{audio_req.get('spoken_text')}', "
-                        f"gender='{audio_req.get('gender')}', style='{audio_req.get('voice_style')}'"
+                        f"gender='{audio_req.get('gender')}', style='{audio_req.get('voice_style')}', "
+                        f"performance='{audio_req.get('performance_prompt')}'"
                     )
                 else:
                     # Lightweight fallback for offline or unavailable LLM. The main path above is LLM-based.
@@ -1296,6 +1804,8 @@ def main():
                         audio_req["spoken_text"] = fallback_text
                     if fallback_pref and not audio_req.get("voice_style"):
                         audio_req["voice_style"] = fallback_pref
+                    if fallback_pref and not audio_req.get("performance_prompt"):
+                        audio_req["performance_prompt"] = fallback_pref
                     if not audio_req.get("gender"):
                         audio_req["gender"] = _infer_gender_from_text(fallback_pref or source_for_parse)
 
@@ -1309,7 +1819,20 @@ def main():
                 preference_parts.append("女声")
             if audio_req.get("voice_style"):
                 preference_parts.append(audio_req.get("voice_style"))
+            if audio_req.get("performance_prompt") or audio_req.get("performance"):
+                preference_parts.append(audio_req.get("performance_prompt") or audio_req.get("performance"))
             preference = " ".join(preference_parts).strip()
+            performance = audio_req.get("performance_prompt") or audio_req.get("performance") or _infer_tts_performance(preference)
+            performance_data = {
+                "performance_prompt": performance,
+                "performance": audio_req.get("performance") or "",
+                "emotion": audio_req.get("emotion") or "",
+                "intensity": audio_req.get("intensity"),
+                "pace": audio_req.get("pace") or "",
+                "volume": audio_req.get("volume") or "",
+                "delivery": audio_req.get("delivery") or "",
+                "audio_tags": audio_req.get("audio_tags") if isinstance(audio_req.get("audio_tags"), list) else [],
+            }
             
             if not clean_text:
                 write_response(resp_file, signal_file, {"success": False, "error": "VOX 台词为空，请填写要朗读的内容"})
@@ -1317,28 +1840,50 @@ def main():
             
             preferred_gender = audio_req.get("gender") if audio_req.get("gender") in ("male", "female") else ""
             
-            # 1. 先尝试关键词匹配。显式性别会作为硬约束传入，避免男声请求落到女声。
-            voice_id = select_voice_by_preference(preference, preferred_gender)
+            selected_voice_id = (audio_req.get("voice_id") or "").strip()
+
+            # 1. 用户在生成音频页签显式选择的声线优先。若该声线需要高级订阅，
+            # make_elevenlabs_tts_request 会继续尝试同一性别的内置免费声线。
+            voice_id = selected_voice_id
+
+            # 2. 未显式选择时，先尝试关键词匹配。显式性别会作为硬约束传入，避免男声请求落到女声。
+            if not voice_id:
+                voice_id = select_voice_by_preference(preference, preferred_gender)
             
-            # 2. 关键词匹配不到，且 LLM 配置可用 → 调用 LLM 兜底
+            # 3. 关键词匹配不到，且 LLM 配置可用 → 调用 LLM 兜底
             if not voice_id:
                 if llm_key and llm_key != "在此填入你的 API Key" and preference:
                     voice_id = select_voice_by_llm(llm_url, llm_key, llm_model, preference, preferred_gender)
             
-            # 3. 仍无匹配，使用同一性别的默认免费语音
+            # 4. 仍无匹配，使用同一性别的默认免费语音
             if not voice_id:
                 voice_id = _default_voice_id(preferred_gender)
             
-            log(f"Voice 选择: 偏好='{preference}', 纯文本='{clean_text}', 选中 voice_id={voice_id}")
-            result = make_elevenlabs_tts_request(elevenlabs_key, clean_text, voice_id, preferred_gender=preferred_gender)
+            compiled_preview = _compile_tts_performance(clean_text, performance, audio_req.get("voice_style") or "", performance_data)
+            log(f"Voice 选择: 偏好='{preference}', 表演='{compiled_preview.get('summary')}', 纯文本='{clean_text}', 选中 voice_id={voice_id}")
+            result = make_elevenlabs_tts_request(
+                elevenlabs_key,
+                clean_text,
+                voice_id,
+                output_dir=output_dir,
+                preferred_gender=preferred_gender,
+                performance=performance,
+                voice_style=audio_req.get("voice_style") or "",
+                performance_data=performance_data,
+            )
             result = prepend_audio_lines(result, [
                 "类型: VOX",
+                f"声线ID: {voice_id}",
                 f"声音: {preference or '默认'}",
+                f"语气: {performance or '默认'}",
+                f"表演编译: {compiled_preview.get('summary') or '默认'}",
                 f"台词: {clean_text}",
+                f"保存目录: {output_dir}",
             ])
         else:
             # 音效模式：Sound Effects（生成爆炸声等）
             sfx_prompt = audio_req.get("prompt") or audio_req.get("source_text") or ""
+            output_dir = _safe_output_dir(audio_req.get("output_dir"))
             if not sfx_prompt:
                 write_response(resp_file, signal_file, {"success": False, "error": "SFX 描述为空，请填写要生成的音效"})
                 sys.exit(1)
@@ -1359,18 +1904,20 @@ def main():
                     sys.exit(1)
                 
                 log(f"中文提示词 '{sfx_prompt}' 翻译为: '{translated}'")
-                result = make_elevenlabs_sound_request(elevenlabs_key, translated)
+                result = make_elevenlabs_sound_request(elevenlabs_key, translated, output_dir=output_dir)
                 result = prepend_audio_lines(result, [
                     "类型: SFX",
                     f"描述: {sfx_prompt}",
                     f"英文提示词: {translated}",
+                    f"保存目录: {output_dir}",
                 ])
             else:
                 # 英文直接调用 Sound Effects API
-                result = make_elevenlabs_sound_request(elevenlabs_key, sfx_prompt)
+                result = make_elevenlabs_sound_request(elevenlabs_key, sfx_prompt, output_dir=output_dir)
                 result = prepend_audio_lines(result, [
                     "类型: SFX",
                     f"描述: {sfx_prompt}",
+                    f"保存目录: {output_dir}",
                 ])
         
     else:

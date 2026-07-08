@@ -880,11 +880,11 @@ function ObjectBinding.create(deps)
     local endpoint, params = Operation.parse_call(step.call or "")
     local config = CREATED_TRACK_BIND_ENDPOINTS[endpoint]
     if not config then return nil end
-    if endpoint_has_explicit_track_target(endpoint, params, config) then return nil end
     local ref_index, ref_key = created_track_ref_param(params, config)
     if ref_index then
       return endpoint, params, ref_index, ref_key or "target", config, "created-ref"
     end
+    if endpoint_has_explicit_track_target(endpoint, params, config) then return nil end
     for _, key in ipairs(config.numeric_params or {}) do
       local numeric_index = tonumber(params[key] or "")
       if numeric_index then

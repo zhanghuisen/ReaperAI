@@ -379,6 +379,10 @@ function AsyncPipe.fetch_models(models_url, api_key, on_complete)
   return AsyncPipe.send_request(models_url, api_key or "", "", {}, on_complete, "models")
 end
 
+function AsyncPipe.fetch_elevenlabs_voices(api_key, on_complete)
+  return AsyncPipe.send_request("https://api.elevenlabs.io/v1/voices", api_key or "", "", {}, on_complete, "elevenlabs_voices")
+end
+
 -- ============================================
 -- 轮询检查信号文件（v1.0 支持多个并发请求）
 -- ============================================

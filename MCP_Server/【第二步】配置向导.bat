@@ -7,7 +7,7 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
 echo ============================================
-echo   ReaperAI v1.0 - 配置向导
+echo   ReaperAI v1.0.2 - 配置向导
 echo ============================================
 echo.
 echo 本向导将帮助你创建 config.json 配置文件

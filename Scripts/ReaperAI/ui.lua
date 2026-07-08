@@ -607,7 +607,7 @@ function UI.render_audio(ctx)
   local available_w = select(1, reaper.ImGui_GetContentRegionAvail(state.ctx))
   local available_h = select(2, reaper.ImGui_GetContentRegionAvail(state.ctx))
   local panel_w = math.max(260, math.min(680, available_w - 20))
-  local text_area_h = math.max(180, math.min(360, available_h - 285))
+  local text_area_h = math.max(150, math.min(320, available_h - 355))
   local accent = 0x2E6EA6FF
   local soft_button = 0x234160FF
   local muted = 0x9AA7B7FF
@@ -656,7 +656,8 @@ function UI.render_audio(ctx)
   local function audio_request_status_text()
     local now = (reaper.time_precise and reaper.time_precise()) or os.clock()
     local dots = math.floor(now * 3) % 4
-    return "请求中" .. string.rep(".", dots) .. string.rep(" ", 3 - dots)
+    local base = tostring(state.audio_status or state.status or "请求中")
+    return base .. string.rep(".", dots) .. string.rep(" ", 3 - dots)
   end
 
   local function render_audio_status()
@@ -675,7 +676,7 @@ function UI.render_audio(ctx)
   local function reset_audio_fields()
     state.audio_sfx_track_name = ""
     state.audio_sfx_prompt = ""
-    state.audio_vox_style = ""
+    state.audio_vox_performance = ""
     state.audio_vox_text = ""
     state.status = "音频输入已重置"
     state.audio_status = state.status
@@ -694,6 +695,103 @@ function UI.render_audio(ctx)
     render_audio_status()
   end
 
+  local eleven = ctx.elevenlabs or {}
+
+  local function selected_vox_voice()
+    if type(eleven.voice_by_id) ~= "function" then return nil end
+    return eleven.voice_by_id(state.audio_vox_voice_id or "", state.audio_vox_dynamic_voices or {})
+  end
+
+  local function vox_voice_options()
+    if type(eleven.voice_options_for_gender) ~= "function" then return {} end
+    return eleven.voice_options_for_gender(state.audio_vox_gender or "female", state.audio_vox_dynamic_voices or {})
+  end
+
+  local function resolved_vox_voice_id()
+    local selected_id = tostring(state.audio_vox_voice_id or "")
+    if selected_id ~= "" then return selected_id end
+    local voices = vox_voice_options()
+    local first = voices[1]
+    return first and tostring(first.id or "") or ""
+  end
+
+  local function set_vox_gender(gender)
+    state.audio_vox_gender = gender
+    local selected = selected_vox_voice()
+    if selected and type(eleven.voice_matches_gender) == "function" and not eleven.voice_matches_gender(selected, gender) then
+      state.audio_vox_voice_id = ""
+    end
+  end
+
+  local function render_vox_voice_picker()
+    label_text("11Labs 声线")
+    local voices = vox_voice_options()
+
+    local selected = selected_vox_voice()
+    if selected and type(eleven.voice_matches_gender) == "function" and not eleven.voice_matches_gender(selected, state.audio_vox_gender or "female") then
+      state.audio_vox_voice_id = ""
+      selected = nil
+    end
+
+    local preview = (#voices > 0) and "自动选择" or "请先刷新声线"
+    if selected and type(eleven.voice_label) == "function" then
+      preview = eleven.voice_label(selected)
+    end
+
+    local refresh_w = 84
+    local combo_w = math.max(160, panel_w - refresh_w - 8)
+    reaper.ImGui_PushItemWidth(state.ctx, combo_w)
+    if begin_combo(state.ctx, "##audio_vox_voice_combo", preview) then
+      reaper.ImGui_PushItemWidth(state.ctx, math.max(140, combo_w - 18))
+      local changed_filter, new_filter = input_text(state.ctx, "##audio_vox_voice_filter", state.audio_vox_voice_filter or "", 0)
+      reaper.ImGui_PopItemWidth(state.ctx)
+      if changed_filter then state.audio_vox_voice_filter = new_filter end
+
+      if #voices > 0 then
+        if selectable(state.ctx, "自动选择##audio_vox_voice_auto", state.audio_vox_voice_id == nil or state.audio_vox_voice_id == "") then
+          state.audio_vox_voice_id = ""
+        end
+        reaper.ImGui_Separator(state.ctx)
+      else
+        reaper.ImGui_TextColored(state.ctx, status_muted, "点击刷新检测可用声线")
+      end
+
+      local visible = 0
+      for _, voice in ipairs(voices) do
+        if type(eleven.voice_matches_filter) ~= "function" or eleven.voice_matches_filter(voice, state.audio_vox_voice_filter or "") then
+          visible = visible + 1
+          local label = (type(eleven.voice_menu_label) == "function") and eleven.voice_menu_label(voice) or tostring(voice.name or voice.id or "Voice")
+          local selected_voice = tostring(state.audio_vox_voice_id or "") == tostring(voice.id or "")
+          if selectable(state.ctx, label, selected_voice) then
+            state.audio_vox_voice_id = tostring(voice.id or "")
+            close_current_popup(state.ctx)
+          end
+        end
+      end
+
+      if visible == 0 then
+        local empty_text = (#voices == 0) and "刷新后只显示可用声线" or "当前性别没有检测通过的声线"
+        reaper.ImGui_TextColored(state.ctx, status_muted, empty_text)
+      end
+      end_combo(state.ctx)
+    end
+    reaper.ImGui_PopItemWidth(state.ctx)
+
+    reaper.ImGui_SameLine(state.ctx)
+    local refresh_disabled = state.audio_vox_voices_refreshing == true
+    if refresh_disabled and reaper.ImGui_BeginDisabled then reaper.ImGui_BeginDisabled(state.ctx, true) end
+    if reaper.ImGui_Button(state.ctx, refresh_disabled and "刷新中##audio_voice_refresh" or "刷新##audio_voice_refresh", refresh_w, 22) then
+      invoke(ctx, "refresh_elevenlabs_voices")
+    end
+    if refresh_disabled and reaper.ImGui_EndDisabled then reaper.ImGui_EndDisabled(state.ctx) end
+
+    if state.audio_vox_voice_refresh_message and state.audio_vox_voice_refresh_message ~= "" then
+      reaper.ImGui_TextColored(state.ctx, status_muted, state.audio_vox_voice_refresh_message)
+    else
+      reaper.ImGui_TextColored(state.ctx, status_muted, "点击刷新检测当前 API 可用声线")
+    end
+  end
+
   mode_button("SFX 模式##audio_top_sfx", "sfx")
   reaper.ImGui_SameLine(state.ctx)
   mode_button("VOX 模式##audio_top_vox", "vox")
@@ -705,16 +803,18 @@ function UI.render_audio(ctx)
 
     label_text("性别")
     if colored_button("男##audio_vox_male", 56, 26, (state.audio_vox_gender == "male") and accent or soft_button) then
-      state.audio_vox_gender = "male"
+      set_vox_gender("male")
     end
     reaper.ImGui_SameLine(state.ctx)
     if colored_button("女##audio_vox_female", 56, 26, (state.audio_vox_gender ~= "male") and accent or soft_button) then
-      state.audio_vox_gender = "female"
+      set_vox_gender("female")
     end
 
     reaper.ImGui_Spacing(state.ctx)
-    local changed_style, new_style = audio_line("声音风格", "audio_vox_style", state.audio_vox_style or "")
-    if changed_style then state.audio_vox_style = new_style end
+    render_vox_voice_picker()
+    reaper.ImGui_Spacing(state.ctx)
+    local changed_performance, new_performance = audio_line("语气/表演", "audio_vox_performance", state.audio_vox_performance or "")
+    if changed_performance then state.audio_vox_performance = new_performance end
     section_separator(false)
     local changed_text, new_text = audio_area("台词", "audio_vox_text", state.audio_vox_text or "")
     if changed_text then state.audio_vox_text = new_text end
@@ -724,7 +824,9 @@ function UI.render_audio(ctx)
       invoke(ctx, "send_elevenlabs_request", {
         mode = "vox",
         gender = state.audio_vox_gender or "female",
-        voice_style = state.audio_vox_style or "",
+        voice_id = resolved_vox_voice_id(),
+        performance = state.audio_vox_performance or "",
+        performance_prompt = state.audio_vox_performance or "",
         spoken_text = state.audio_vox_text or "",
       })
     end)
@@ -755,6 +857,29 @@ function UI.render_operation_cards(ctx)
   if not op then return end
 
   reaper.ImGui_Separator(state.ctx)
+  if op.placeholder then
+    local now = (reaper.time_precise and reaper.time_precise()) or os.clock()
+    local dots = math.floor(now * 3) % 4
+    local phase = tostring(op.phase_text or state.status or "正在生成执行计划")
+    local elapsed = tonumber(op.elapsed or 0) or 0
+    local title = tostring(op.placeholder_title or "正在生成执行计划")
+    reaper.ImGui_TextColored(state.ctx, 0xFFAA00FF, title .. string.rep(".", dots))
+    reaper.ImGui_TextWrapped(state.ctx, "阶段: " .. phase)
+    if elapsed >= 1 then
+      reaper.ImGui_TextColored(state.ctx, 0x888888FF, "已等待: " .. tostring(math.floor(elapsed)) .. " 秒")
+    end
+    local summary = tostring(op.summary or "")
+    if summary ~= "" then
+      reaper.ImGui_TextWrapped(state.ctx, "需求: " .. summary)
+    end
+    reaper.ImGui_TextColored(state.ctx, 0x888888FF, "完成后会自动替换为确认卡；不会自动执行。")
+    if reaper.ImGui_Button(state.ctx, "取消", 70, 28) then
+      invoke(ctx, "cancel_pending_operation")
+    end
+    reaper.ImGui_Separator(state.ctx)
+    return
+  end
+
   local user_risk = tostring(op.user_risk or "")
   local needs_clarification = op.needs_clarification == true or op.contract_status == "needs_clarification"
   local clarification_button_count = 0
@@ -982,7 +1107,7 @@ function UI.render_operation_cards(ctx)
       state.scroll = true
     elseif result then
       state.waiting = true
-      state.status = "等待 AI 响应..."
+      state.status = state.status or "等待 AI 响应..."
       state.scroll = true
     end
   end
@@ -1082,7 +1207,14 @@ function UI.render_chat(ctx)
 
   local w, h = reaper.ImGui_GetContentRegionAvail(state.ctx)
   local input_panel_h = 58
-  local operation_panel_h = state.pending_operation and ((state.pending_operation.needs_clarification and 380) or 235) or 0
+  local operation_panel_h = 0
+  if state.pending_operation then
+    if state.pending_operation.placeholder then
+      operation_panel_h = 150
+    else
+      operation_panel_h = (state.pending_operation.needs_clarification and 380) or 235
+    end
+  end
   local bottom_panel_h = input_panel_h + operation_panel_h + (state.pending_operation and 8 or 0)
   if h < bottom_panel_h + 90 then
     bottom_panel_h = math.max(input_panel_h, h - 90)
@@ -1165,6 +1297,9 @@ function UI.render_chat(ctx)
         end
         state.waiting = false
         state.status = "就绪"
+        if state.pending_operation and state.pending_operation.placeholder then
+          state.pending_operation = nil
+        end
         if state.audio_waiting then
           state.audio_pending_count = 0
           state.audio_waiting = false
@@ -1230,7 +1365,7 @@ function UI.render_chat(ctx)
           state.scroll = true
         elseif result then
           state.waiting = true
-          state.status = "等待 AI 响应..."
+          state.status = state.status or "等待 AI 响应..."
           state.scroll = true
         else
           state.status = "发送失败"
@@ -1246,7 +1381,7 @@ function UI.render(ctx)
   reaper.ImGui_SetNextWindowSize(state.ctx, 640, 720, reaper.ImGui_Cond_FirstUseEver())
 
   local flags = reaper.ImGui_WindowFlags_MenuBar()
-  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0 智能助手", true, flags)
+  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.2 智能助手", true, flags)
 
   if visible then
     if reaper.ImGui_BeginMenuBar(state.ctx) then

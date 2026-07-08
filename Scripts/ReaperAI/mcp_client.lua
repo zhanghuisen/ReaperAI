@@ -475,17 +475,6 @@ function McpClient.create(options)
     return false, err
   end
 
-  function MCP.parse_and_queue_calls(call_strings)
-    local json_payload = '{"calls":['
-    for i, call in ipairs(call_strings) do
-      if i > 1 then json_payload = json_payload .. ',' end
-      json_payload = json_payload .. '"' .. call:gsub('"', '\\"') .. '"'
-    end
-    json_payload = json_payload .. ']}'
-
-    return MCP.http_post("/mcp/parse", json_payload)
-  end
-
   function MCP.get_commands()
     return MCP.http_get("/command_queue")
   end
@@ -549,33 +538,6 @@ function McpClient.create(options)
       return prompt.build_capabilities_text(json_resp)
     end
     return nil, 0
-  end
-
-  function MCP.submit_calls_to_server(calls)
-    if not calls or #calls == 0 then
-      return true
-    end
-
-    if not MCP.ping() then
-      return false, "MCP 服务器离线"
-    end
-
-    local calls_json = {}
-    for _, call in ipairs(calls) do
-      table.insert(calls_json, json_encode_string(call))
-    end
-    local payload = '{"calls":[' .. table.concat(calls_json, ',') .. ']}'
-
-    local resp, err = MCP.http_post("/mcp/parse", payload)
-    if not resp then
-      return false, "提交失败: " .. tostring(err)
-    end
-
-    if resp:find('"success"%s*:%s*true') then
-      return true
-    end
-
-    return false, "服务器返回失败"
   end
 
   function MCP.server_file_candidates(filename)

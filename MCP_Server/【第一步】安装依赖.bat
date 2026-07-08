@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
-title ReaperAI v1.0 - Install dependencies
+title ReaperAI v1.0.2 - Install dependencies
 
 set "PYTHON_VERSION=3.11.9"
 set "SCRIPT_DIR=%~dp0"
@@ -22,7 +22,7 @@ set "CORE_FAILED=0"
 set "WHEELS_EXPANDED=0"
 
 echo ============================================
-echo   ReaperAI v1.0 - Install dependencies
+echo   ReaperAI v1.0.2 - Install dependencies
 echo ============================================
 echo.
 echo This script will prepare a local Python runtime for ReaperAI.

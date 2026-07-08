@@ -15,6 +15,192 @@ local function trim_text(s)
   return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+local FREE_VOICE_OPTIONS = {
+  { id = "21m00Tcm4TlvDq8ikWAM", name = "Rachel", gender = "female", free = true, tags = { "standard", "default", "female", "broadcast" } },
+  { id = "AZnzlk1XvdvUeBnXmlld", name = "Domi", gender = "female", free = true, tags = { "mature", "calm", "female" } },
+  { id = "EXAVITQu4vr4xnSDxMaL", name = "Bella", gender = "female", free = true, tags = { "sweet", "cute", "gentle", "female" } },
+  { id = "MF3mGyEYCl7XYWbV9V6O", name = "Elli", gender = "female", free = true, tags = { "young", "energetic", "female" } },
+  { id = "piTKgcLEGmPE4e6mEKli", name = "Nicole", gender = "female", free = true, tags = { "soft", "whisper", "female" } },
+  { id = "pFZP5JQG7iQjIQuC4Bku", name = "Lily", gender = "female", free = true, tags = { "gentle", "young", "female" } },
+  { id = "TxGEqnHWrfWFTfGW9XjX", name = "Josh", gender = "male", free = true, tags = { "standard", "default", "male", "deep" } },
+  { id = "ErXwobaYiN019PkySvjV", name = "Antoni", gender = "male", free = true, tags = { "standard", "clear", "male" } },
+  { id = "VR6AewLTigWG4xSOukaG", name = "Arnold", gender = "male", free = true, tags = { "husky", "raspy", "powerful", "male" } },
+  { id = "pNInz6obpgDQGcFmaJgB", name = "Adam", gender = "male", free = true, tags = { "anchor", "formal", "serious", "male" } },
+  { id = "yoZ06aMxZJJ28mfd3POQ", name = "Sam", gender = "male", free = true, tags = { "old", "mature", "male" } },
+  { id = "ZQe5CZNOzWyzPSCn5a3c", name = "James", gender = "male", free = true, tags = { "australian", "accent", "male" } },
+  { id = "zrHiDhphv9ZnVXBqCLhn", name = "Mimi", gender = "female", free = true, tags = { "australian", "accent", "female" } },
+}
+
+local function normalize_gender_value(gender)
+  gender = tostring(gender or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if gender == "m" or gender == "man" or gender == "male" then return "male" end
+  if gender == "f" or gender == "woman" or gender == "female" then return "female" end
+  return ""
+end
+
+local function copy_tags(tags)
+  local out = {}
+  if type(tags) == "table" then
+    for _, tag in ipairs(tags) do
+      tag = trim_text(tag)
+      if tag ~= "" then table.insert(out, tag) end
+    end
+  elseif tags and tags ~= "" then
+    for tag in tostring(tags):gmatch("[^,;|]+") do
+      tag = trim_text(tag)
+      if tag ~= "" then table.insert(out, tag) end
+    end
+  end
+  return out
+end
+
+local function copy_voice(voice)
+  if type(voice) ~= "table" then return nil end
+  local id = trim_text(voice.id or voice.voice_id or "")
+  if id == "" then return nil end
+  local free_value = voice.free
+  if type(free_value) == "string" then
+    local lower = free_value:lower()
+    free_value = lower == "1" or lower == "true" or lower == "yes" or lower == "free"
+  end
+  local available_value = voice.available
+  if type(available_value) == "string" then
+    local lower = available_value:lower()
+    available_value = lower == "1" or lower == "true" or lower == "yes" or lower == "available" or lower == "verified"
+  end
+  return {
+    id = id,
+    name = trim_text(voice.name or voice.label or id),
+    gender = normalize_gender_value(voice.gender),
+    free = free_value == true,
+    available = available_value == true,
+    source = trim_text(voice.source or (free_value == true and "free" or "account")),
+    tags = copy_tags(voice.tags),
+  }
+end
+
+local function free_voices()
+  local out = {}
+  for _, voice in ipairs(FREE_VOICE_OPTIONS) do
+    table.insert(out, copy_voice(voice))
+  end
+  return out
+end
+
+local function voice_by_id(voice_id, dynamic_voices)
+  voice_id = trim_text(voice_id)
+  if voice_id == "" then return nil end
+  if dynamic_voices ~= nil then
+    for _, voice in ipairs(dynamic_voices or {}) do
+      if tostring(voice.id or voice.voice_id or "") == voice_id then
+        return copy_voice(voice)
+      end
+    end
+    return nil
+  end
+  for _, voice in ipairs(FREE_VOICE_OPTIONS) do
+    if tostring(voice.id or voice.voice_id or "") == voice_id then
+      return copy_voice(voice)
+    end
+  end
+  return nil
+end
+
+local function voice_matches_gender(voice, gender)
+  gender = normalize_gender_value(gender)
+  if gender == "" then return true end
+  return normalize_gender_value(voice and voice.gender) == gender
+end
+
+local function merged_voice_options(dynamic_voices)
+  local out, index = {}, {}
+  local function add(voice)
+    voice = copy_voice(voice)
+    if not voice then return end
+    local existing_at = index[voice.id]
+    if existing_at then
+      out[existing_at] = voice
+      return
+    end
+    index[voice.id] = #out + 1
+    table.insert(out, voice)
+  end
+  for _, voice in ipairs(dynamic_voices or {}) do add(voice) end
+  return out
+end
+
+local function voice_options_for_gender(gender, dynamic_voices)
+  gender = normalize_gender_value(gender)
+  local out = {}
+  for _, voice in ipairs(merged_voice_options(dynamic_voices)) do
+    if voice_matches_gender(voice, gender) then
+      table.insert(out, voice)
+    end
+  end
+  return out
+end
+
+local function default_voice_id(gender)
+  gender = normalize_gender_value(gender)
+  for _, voice in ipairs(FREE_VOICE_OPTIONS) do
+    if voice_matches_gender(voice, gender) then
+      return voice.id
+    end
+  end
+  return "21m00Tcm4TlvDq8ikWAM"
+end
+
+local function voice_label(voice)
+  voice = copy_voice(voice)
+  if not voice then return "自动选择" end
+  local gender_label = voice.gender == "male" and "男声" or (voice.gender == "female" and "女声" or "未标性别")
+  return string.format("%s · %s", voice.name ~= "" and voice.name or voice.id, gender_label)
+end
+
+local function voice_menu_label(voice)
+  voice = copy_voice(voice)
+  if not voice then return "自动选择" end
+  return voice_label(voice) .. "##audio_voice_" .. voice.id
+end
+
+local function voice_matches_filter(voice, filter)
+  filter = trim_text(filter):lower()
+  if filter == "" then return true end
+  voice = copy_voice(voice)
+  if not voice then return false end
+  local haystack = {
+    voice.id or "",
+    voice.name or "",
+    voice.gender or "",
+    table.concat(voice.tags or {}, " "),
+  }
+  return table.concat(haystack, " "):lower():find(filter, 1, true) ~= nil
+end
+
+local function parse_voice_lines(content)
+  local voices = {}
+  for line in tostring(content or ""):gmatch("[^\r\n]+") do
+    line = trim_text(line)
+    if line ~= "" and not line:match("^#") then
+      local fields = {}
+      for field in (line .. "\t"):gmatch("([^\t]*)\t") do
+        table.insert(fields, field)
+      end
+      local voice = copy_voice({
+        id = fields[1] or "",
+        name = fields[2] or "",
+        gender = fields[3] or "",
+        free = fields[4] or "",
+        source = fields[5] or "",
+        tags = fields[6] or "",
+        available = fields[7] or "",
+      })
+      if voice then table.insert(voices, voice) end
+    end
+  end
+  return voices
+end
+
 local function json_string(s)
   return '"' .. esc(s) .. '"'
 end
@@ -136,6 +322,7 @@ local VOX_STYLE_MAP = {
   {label = "Husky", words = {"沙哑", "husky", "raspy"}},
   {label = "Cute", words = {"可爱", "cute"}},
   {label = "Calm", words = {"冷静", "平静", "calm"}},
+  {label = "Shout", words = {"大喊", "喊叫", "喊", "吼", "shout", "shouting", "yell", "yelling", "loud"}},
   {label = "Angry", words = {"愤怒", "生气", "angry"}},
   {label = "Happy", words = {"开心", "快乐", "happy"}},
   {label = "Sad", words = {"悲伤", "sad"}},
@@ -149,30 +336,6 @@ local function strip_audio_track_prefix(name)
   name = name:gsub("^11[_%s%-]*[Vv][Oo][Xx][_%s%-]*", "")
   name = name:gsub("^11[_%s%-]*", "")
   return trim_text(name)
-end
-
-local function infer_sfx_track_label(text)
-  text = normalize_label_text(text)
-  local keyword_label = collect_keyword_label(text, SFX_LABEL_MAP, 2)
-  if keyword_label ~= "" then return keyword_label end
-  text = text:gsub("把.-$", "")
-  text = text:gsub("需要", "")
-  text = text:gsub("短促", "")
-  text = text:gsub("一点", "")
-  text = trim_text(text)
-  if text == "" then return "SFX" end
-  return utf8_safe_sub(text, 10)
-end
-
-local function infer_vox_track_label(req)
-  local style = normalize_label_text(req.voice_style or "")
-  local style_label = collect_keyword_label(style, VOX_STYLE_MAP, 1)
-  local gender_label = (req.gender == "male") and "Male" or "Female"
-  if style_label == "" and style ~= "" then
-    style_label = utf8_safe_sub(style:gsub("男声", ""):gsub("男生", ""):gsub("女声", ""):gsub("女生", ""), 8)
-  end
-  if style_label == "" then style_label = "Voice" end
-  return style_label .. gender_label
 end
 
 local function elevenlabs_track_name(mode, candidate, req)
@@ -251,6 +414,8 @@ local function parse_audio_shortcut(text)
     mode = "",
     prompt = "",
     voice_style = "",
+    performance = "",
+    performance_prompt = "",
     spoken_text = "",
     gender = "",
     track_name = "",
@@ -280,6 +445,8 @@ local function parse_audio_shortcut(text)
   if req.mode == "vox" then
     local style, spoken = split_vox_style_and_text(body)
     req.voice_style = style
+    req.performance = ""
+    req.performance_prompt = ""
     req.spoken_text = spoken
     req.gender = infer_audio_gender(style) or ""
     req.semantic_parse = true
@@ -306,7 +473,10 @@ function ElevenLabs.normalize_request(input)
 
   if req.mode == "vox" then
     req.voice_style = trim_text(req.voice_style or req.style or "")
+    req.performance_prompt = trim_text(req.performance_prompt or req.performance or req.tone or req.emotion or "")
+    req.performance = req.performance_prompt
     req.spoken_text = trim_text(req.spoken_text or req.text or req.prompt or "")
+    req.voice_id = trim_text(req.voice_id or req.voice or "")
     req.gender = tostring(req.gender or infer_audio_gender(req.voice_style) or ""):lower()
     if req.semantic_parse and req.gender ~= "male" and req.gender ~= "female" then
       req.gender = ""
@@ -320,6 +490,7 @@ function ElevenLabs.normalize_request(input)
   end
 
   req.source_text = trim_text(req.source_text or "")
+  req.output_dir = trim_text(req.output_dir or "")
   return req
 end
 
@@ -331,8 +502,12 @@ function ElevenLabs.request_json(req)
     ',"prompt":', json_string(req.prompt or ""),
     ',"gender":', json_string(req.gender or ""),
     ',"voice_style":', json_string(req.voice_style or ""),
+    ',"performance":', json_string(req.performance or ""),
+    ',"performance_prompt":', json_string(req.performance_prompt or req.performance or ""),
+    ',"voice_id":', json_string(req.voice_id or ""),
     ',"spoken_text":', json_string(req.spoken_text or ""),
     ',"source_text":', json_string(req.source_text or ""),
+    ',"output_dir":', json_string(req.output_dir or ""),
     ',"semantic_parse":', (req.semantic_parse and "true" or "false"),
     "}"
   }
@@ -344,7 +519,7 @@ function ElevenLabs.start_message(req)
     if req.semantic_parse then
       return "正在解析并生成 VOX: " .. tostring(req.source_text or req.spoken_text or "")
     end
-    local style = trim_text(((req.gender == "male") and "男声" or "女声") .. " " .. tostring(req.voice_style or ""))
+    local style = trim_text(((req.gender == "male") and "男声" or "女声") .. " " .. tostring(req.voice_style or "") .. " " .. tostring(req.performance_prompt or req.performance or ""))
     return "正在生成 VOX: " .. tostring(req.spoken_text or "") .. "\n声音: " .. style
   end
   return "正在生成 SFX: " .. tostring(req.prompt or "")
@@ -360,12 +535,150 @@ end
 
 function ElevenLabs.build_import_script(track_name, wav_path)
   return string.format([[
-    reaper.InsertTrackAtIndex(reaper.CountTracks(0), true)
-    local track = reaper.GetTrack(0, reaper.CountTracks(0) - 1)
-    reaper.GetSetMediaTrackInfo_String(track, "P_NAME", %s, true)
+    local track_name = %s
+    local wav_path = %s
+
+    local function import_result(ok, message, extra)
+      extra = extra or {}
+      extra.ok = ok and true or false
+      extra.message = tostring(message or "")
+      extra.path = wav_path
+      extra.track = track_name
+      return extra
+    end
+
+    local track = nil
+    local peak_action_ran = false
+    local function reaper_false(value)
+      return value == false or value == nil or value == 0
+    end
+
+    local function fail_import(message, extra)
+      if track and reaper.CountTrackMediaItems and reaper.DeleteTrack and reaper.CountTrackMediaItems(track) == 0 then
+        reaper.DeleteTrack(track)
+      end
+      return import_result(false, message, extra)
+    end
+
+    local function select_item_for_peaks(target_item)
+      if not target_item then return end
+      if reaper.SelectAllMediaItems then reaper.SelectAllMediaItems(0, false) end
+      if reaper.SetMediaItemSelected then
+        reaper.SetMediaItemSelected(target_item, true)
+      elseif reaper.SetMediaItemInfo_Value then
+        reaper.SetMediaItemInfo_Value(target_item, "B_UISEL", 1)
+      end
+      if reaper.GetActiveTake and reaper.SetActiveTake then
+        local active_take = reaper.GetActiveTake(target_item)
+        if active_take then reaper.SetActiveTake(active_take) end
+      end
+    end
+
+    local function refresh_item_peaks(target_item)
+      if target_item then
+        select_item_for_peaks(target_item)
+        if reaper.UpdateItemInProject then reaper.UpdateItemInProject(target_item) end
+      end
+      if reaper.TrackList_AdjustWindows then reaper.TrackList_AdjustWindows(false) end
+      if reaper.UpdateTimeline then reaper.UpdateTimeline() end
+      if reaper.UpdateArrange then reaper.UpdateArrange() end
+      if target_item and reaper.Main_OnCommand then
+        reaper.Main_OnCommand(40245, 0) -- Peaks: Build any missing peaks for selected items
+        peak_action_ran = true
+      end
+      if target_item and reaper.UpdateItemInProject then reaper.UpdateItemInProject(target_item) end
+      if reaper.UpdateTimeline then reaper.UpdateTimeline() end
+      if reaper.UpdateArrange then reaper.UpdateArrange() end
+    end
+
+    local before_items = reaper.CountMediaItems(0)
+    local insert_index = reaper.CountTracks(0)
+    reaper.InsertTrackAtIndex(insert_index, true)
+    track = reaper.GetTrack(0, insert_index)
+    if not track then
+      return fail_import("无法创建导入轨道")
+    end
+
+    reaper.GetSetMediaTrackInfo_String(track, "P_NAME", track_name, true)
     reaper.SetOnlyTrackSelected(track)
-    local ok = reaper.InsertMedia(%s, 0)
-    return ok and "已导入音频" or "InsertMedia 返回 false"
+    if reaper.SetMediaTrackInfo_Value then
+      reaper.SetMediaTrackInfo_Value(track, "I_SELECTED", 1)
+    end
+
+    local item = nil
+    local source = nil
+    if reaper.PCM_Source_CreateFromFile then
+      source = reaper.PCM_Source_CreateFromFile(wav_path)
+    end
+
+    if source then
+      local source_len = 0
+      if reaper.GetMediaSourceLength then
+        local length_value = reaper.GetMediaSourceLength(source)
+        source_len = tonumber(length_value) or 0
+      end
+      if source_len <= 0 then source_len = 1.0 end
+
+      item = reaper.AddMediaItemToTrack(track)
+      if not item then
+        if source and reaper.PCM_Source_Destroy then reaper.PCM_Source_Destroy(source) end
+        return fail_import("无法创建媒体 item")
+      end
+
+      local take = reaper.AddTakeToMediaItem(item)
+      if not take then
+        if source and reaper.PCM_Source_Destroy then reaper.PCM_Source_Destroy(source) end
+        if reaper.DeleteTrackMediaItem then reaper.DeleteTrackMediaItem(track, item) end
+        return fail_import("无法创建媒体 take")
+      end
+
+      reaper.SetMediaItemTake_Source(take, source)
+      source = nil
+      reaper.SetActiveTake(take)
+      reaper.SetMediaItemInfo_Value(item, "D_POSITION", reaper.GetCursorPosition())
+      reaper.SetMediaItemInfo_Value(item, "D_LENGTH", source_len)
+      reaper.SetMediaItemInfo_Value(item, "B_UISEL", 1)
+      if reaper.UpdateItemInProject then reaper.UpdateItemInProject(item) end
+    else
+      local inserted = reaper.InsertMedia(wav_path, 0)
+      if reaper_false(inserted) then
+        return fail_import("PCM_Source_CreateFromFile 失败，InsertMedia 也未导入媒体")
+      end
+      if reaper.GetSelectedMediaItem then
+        item = reaper.GetSelectedMediaItem(0, 0)
+      end
+      if not item and track and reaper.CountTrackMediaItems and reaper.GetTrackMediaItem then
+        local track_item_count = reaper.CountTrackMediaItems(track)
+        if track_item_count > 0 then
+          item = reaper.GetTrackMediaItem(track, track_item_count - 1)
+        end
+      end
+    end
+
+    refresh_item_peaks(item)
+    if reaper.UpdateArrange then reaper.UpdateArrange() end
+
+    local after_items = reaper.CountMediaItems(0)
+    local track_items = reaper.CountTrackMediaItems(track)
+    local added = after_items - before_items
+    if added <= 0 then
+      return fail_import("导入命令完成，但工程里没有新增 item", {
+        items_added = added,
+        track_items = track_items,
+      })
+    end
+
+    local message = "已导入音频"
+    if track_items <= 0 then
+      message = "已导入音频，但未落在新建轨道"
+    end
+
+    return import_result(true, message, {
+      items_added = added,
+      track_items = track_items,
+      track_index = insert_index + 1,
+      peaks_built = peak_action_ran,
+    })
   ]], lua_string_literal(track_name), lua_string_literal(wav_path))
 end
 
@@ -374,5 +687,14 @@ ElevenLabs.safe_track_name = safe_track_name
 ElevenLabs.elevenlabs_track_name = elevenlabs_track_name
 ElevenLabs.utf8_safe_sub = utf8_safe_sub
 ElevenLabs.infer_audio_gender = infer_audio_gender
+ElevenLabs.free_voices = free_voices
+ElevenLabs.voice_by_id = voice_by_id
+ElevenLabs.voice_matches_gender = voice_matches_gender
+ElevenLabs.voice_options_for_gender = voice_options_for_gender
+ElevenLabs.default_voice_id = default_voice_id
+ElevenLabs.voice_label = voice_label
+ElevenLabs.voice_menu_label = voice_menu_label
+ElevenLabs.voice_matches_filter = voice_matches_filter
+ElevenLabs.parse_voice_lines = parse_voice_lines
 
 return ElevenLabs

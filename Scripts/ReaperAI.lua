@@ -1,11 +1,11 @@
 --[[
-  ReaperAI v1.0 - 智能助手
+  ReaperAI v1.0.2 - 智能助手
   
   作者：zhanghuisen
   
   前置要求：ReaImGui（通过 ReaPack 安装）
   
-  版本：1.0 (2026-05-05) - 音效变体生成器版本
+  版本：1.0.2 (2026-07-09)
   核心特性：
   - 异步 HTTP：使用后台 worker，不阻塞 REAPER UI
   - 智能助手：支持咨询与操作双模式
@@ -78,6 +78,7 @@ local ReaperCapabilities = reaperai_load_module("reaper_capabilities")
 local McpFallback = reaperai_load_module("mcp_fallback").create()
 local ContextModule = reaperai_load_module("context")
 local UI = reaperai_load_module("ui")
+local Waiting = reaperai_load_module("waiting")
 local ElevenLabs = reaperai_load_module("elevenlabs")
 local LlmProviders = reaperai_load_module("llm_providers")
 local CapabilityRegistry = reaperai_load_module("capability_registry")
@@ -93,6 +94,10 @@ local RuntimeModel = reaperai_load_module("runtime_model").create({
 local RuntimeState = RuntimeModel.RuntimeState
 local GeneratedRegistry = RuntimeModel.GeneratedRegistry
 local ObjectBinding = RuntimeModel.ObjectBinding
+local ProjectFacts = reaperai_load_module("project_facts").create({
+  Operation = Operation,
+  RuntimeState = RuntimeState,
+})
 local CuratedCapabilityRegistry = CapabilityRegistry.create({
   Operation = Operation,
   ReaperCapabilities = Capabilities,
@@ -163,10 +168,6 @@ local function read_mcp_shutdown_log()
   return MCP.read_shutdown_log()
 end
 
-local function submit_mcp_calls_to_server(calls)
-  return MCP.submit_calls_to_server(calls)
-end
-
 -- ============================================
 -- 配置
 -- ============================================
@@ -204,10 +205,18 @@ local state = {
   audio_waiting  = false,
   audio_pending_count = 0,
   audio_status   = "就绪",
+  audio_wait_kind = "",
+  audio_started_at = 0,
   audio_sfx_track_name = "",
   audio_sfx_prompt = "",
   audio_vox_gender = "female",
-  audio_vox_style = "",
+  audio_vox_voice_id = "",
+  audio_vox_voice_filter = "",
+  audio_vox_voice_picker_open = false,
+  audio_vox_dynamic_voices = {},
+  audio_vox_voices_refreshing = false,
+  audio_vox_voice_refresh_message = "",
+  audio_vox_performance = "",
   audio_vox_text = "",
   local_capability_status = nil,
   capability_probe_running = false,
@@ -253,6 +262,9 @@ local state = {
   last_ai_operation = nil, -- 最近一次已执行的 AI 操作
   runtime_generated_registry = nil,
   conversation_epoch = 0,
+  wait_started_at = 0,
+  wait_kind = "",
+  wait_user_request = "",
 }
 
 local RAI_INSTANCE_SECTION = "ReaperAI"
@@ -312,6 +324,7 @@ local function reset_conversation_state(reason, opts)
   state.messages = {}
   state.input_text = ""
   state.waiting = false
+  Waiting.clear(state)
   state.async_response = nil
   state.pending_operation = nil
   state.last_ai_operation = nil
@@ -321,6 +334,8 @@ local function reset_conversation_state(reason, opts)
   state.audio_waiting = false
   state.audio_pending_count = 0
   state.audio_status = "就绪"
+  state.audio_wait_kind = ""
+  state.audio_started_at = 0
   state.scroll = true
   if opts.status then
     state.status = opts.status
@@ -615,24 +630,6 @@ local function set_audio_status(text)
   state.audio_status = tostring(text or "")
   state.audio_waiting = (state.audio_pending_count or 0) > 0
 end
-
-local function operation_status_text(op)
-  if op and op.needs_clarification then return "Needs clarification" end
-  if op and op.preflight_ok == false then return "Operation blocked" end
-  return "Pending operation"
-end
-
-local function begin_audio_request()
-  state.audio_pending_count = (state.audio_pending_count or 0) + 1
-  state.audio_waiting = true
-  state.audio_status = "请求中..."
-end
-
-local function finish_audio_request(text)
-  state.audio_pending_count = math.max(0, (state.audio_pending_count or 1) - 1)
-  state.audio_waiting = state.audio_pending_count > 0
-  state.audio_status = tostring(text or state.audio_status or "")
-end
 local render_operation_cards
 local parse_executable_steps
 local execute_operation_parts
@@ -647,6 +644,38 @@ local function config_file()
   return reaper.GetResourcePath() .. "/ReaperAI_config.txt"
 end
 
+local function path_join(a, b)
+  a = tostring(a or ""):gsub("/", "\\"):gsub("\\+$", "")
+  b = tostring(b or ""):gsub("^[/\\]+", "")
+  if a == "" then return b end
+  if b == "" then return a end
+  return a .. "\\" .. b
+end
+
+local function path_dirname(path)
+  path = tostring(path or ""):gsub("/", "\\")
+  return path:match("^(.*)\\[^\\]+$") or ""
+end
+
+local function current_project_file_path()
+  if not (reaper and reaper.EnumProjects) then return "" end
+  local ok, first, second = pcall(reaper.EnumProjects, -1, "")
+  if not ok then return "" end
+  if type(second) == "string" and second ~= "" then return second end
+  if type(first) == "string" and first ~= "" then return first end
+  return ""
+end
+
+local function elevenlabs_output_dir()
+  local project_file = current_project_file_path()
+  local project_dir = path_dirname(project_file)
+  if project_dir ~= "" then
+    return path_join(project_dir, "ReaperAI Media")
+  end
+  local resource_path = (reaper and reaper.GetResourcePath and reaper.GetResourcePath()) or ""
+  return path_join(path_join(resource_path, "ReaperAI"), "GeneratedAudio")
+end
+
 local function config_one_line(value)
   value = tostring(value or "")
   value = value:gsub("[\r\n]", "")
@@ -654,6 +683,7 @@ local function config_one_line(value)
 end
 
 local LlmSettings = {}
+local ElevenVoiceSettings = {}
 
 function LlmSettings.split_config_list(value)
   local items = {}
@@ -718,7 +748,7 @@ local function save_config()
   end
 
   f:write(table.concat({
-    "# ReaperAI v1.0 配置文件",
+    "# ReaperAI v1.0.2 配置文件",
     "# 格式: KEY=VALUE",
     "# 现在推荐在 ReaperAI 设置面板中编辑，文件仅作为本地存储。",
     "# 支持配置项: LLM_PROVIDER, LLM_API_KEY, LLM_API_URL, LLM_MODEL, LLM_RECENT_MODELS, ELEVENLABS_API_KEY",
@@ -730,7 +760,7 @@ local function save_config()
     "LLM_RECENT_MODELS=" .. LlmSettings.encode_recent_models(),
     "",
     "# ElevenLabs 语音/音效生成 (可选)",
-    "# 推荐使用生成音频页；快捷方式: 11vox 声音风格说 台词 / 11sfx 音效描述",
+    "# 推荐使用生成音频页；快捷方式: 11vox 语气说 台词 / 11sfx 音效描述",
     "ELEVENLABS_API_KEY=" .. config_one_line(CONFIG.elevenlabs_key),
     "",
   }, "\n"))
@@ -889,6 +919,97 @@ function LlmSettings.refresh_models()
   return true, state.llm_model_refresh_message
 end
 
+function ElevenVoiceSettings.parse_worker_response(response)
+  if not response or response == "" then
+    return nil, "空响应"
+  end
+  if tostring(response):match("^%[ERROR%]") then
+    return nil, tostring(response):gsub("^%[ERROR%]%s*", "")
+  end
+  if json_bool_field(response, "success") == false then
+    return nil, json_string_field(response, "error") or "刷新 ElevenLabs 声线失败"
+  end
+
+  local content = json_string_field(response, "content")
+  if not content or content == "" then
+    content = tostring(response or "")
+  end
+
+  local voices = ElevenLabs.parse_voice_lines(content)
+  if #voices == 0 then
+    return nil, "ElevenLabs 声线响应中没有可用声线"
+  end
+  return voices, {
+    message = json_string_field(response, "message") or "",
+    fallback = json_bool_field(response, "fallback") == true,
+  }
+end
+
+function ElevenVoiceSettings.refresh_voices()
+  local elevenlabs_key = CONFIG.elevenlabs_key or ""
+  if elevenlabs_key == "" or elevenlabs_key == "在此填入 ElevenLabs API Key" then
+    state.audio_vox_dynamic_voices = {}
+    state.audio_vox_voice_id = ""
+    state.audio_vox_voice_refresh_message = "请先填写 ElevenLabs Key"
+    state.status = state.audio_vox_voice_refresh_message
+    return false, state.audio_vox_voice_refresh_message
+  end
+
+  if not AsyncPipe or type(AsyncPipe.fetch_elevenlabs_voices) ~= "function" then
+    state.audio_vox_dynamic_voices = {}
+    state.audio_vox_voice_id = ""
+    state.audio_vox_voice_refresh_message = "异步模块未更新，无法检测声线"
+    state.status = state.audio_vox_voice_refresh_message
+    return false, state.audio_vox_voice_refresh_message
+  end
+
+  state.audio_vox_voices_refreshing = true
+  state.audio_vox_voice_refresh_message = "正在检测 ElevenLabs 可用声线"
+  state.status = state.audio_vox_voice_refresh_message
+
+  local req_id, err = AsyncPipe.fetch_elevenlabs_voices(elevenlabs_key, function(response, error)
+    state.audio_vox_voices_refreshing = false
+    if error then
+      state.audio_vox_dynamic_voices = {}
+      state.audio_vox_voice_id = ""
+      state.audio_vox_voice_refresh_message = "声线检测失败: " .. tostring(error)
+      state.status = state.audio_vox_voice_refresh_message
+      return
+    end
+
+    local voices, meta = ElevenVoiceSettings.parse_worker_response(response)
+    if not voices then
+      state.audio_vox_dynamic_voices = {}
+      state.audio_vox_voice_id = ""
+      state.audio_vox_voice_refresh_message = "没有检测到可用声线: " .. tostring(meta)
+      state.status = state.audio_vox_voice_refresh_message
+      return
+    end
+
+    state.audio_vox_dynamic_voices = voices
+    local selected = ElevenLabs.voice_by_id(state.audio_vox_voice_id, voices)
+    if state.audio_vox_voice_id ~= "" and (not selected or not ElevenLabs.voice_matches_gender(selected, state.audio_vox_gender)) then
+      state.audio_vox_voice_id = ""
+    end
+
+    local message = "已检测到 " .. tostring(#voices) .. " 条可用声线"
+    if meta and meta.message ~= "" then message = meta.message end
+    state.audio_vox_voice_refresh_message = message
+    state.status = state.audio_vox_voice_refresh_message
+  end)
+
+  if not req_id then
+    state.audio_vox_voices_refreshing = false
+    state.audio_vox_dynamic_voices = {}
+    state.audio_vox_voice_id = ""
+    state.audio_vox_voice_refresh_message = "声线检测启动失败: " .. tostring(err)
+    state.status = state.audio_vox_voice_refresh_message
+    return false, state.audio_vox_voice_refresh_message
+  end
+
+  return true, state.audio_vox_voice_refresh_message
+end
+
 function LlmSettings.test_connection()
   if CONFIG.llm_key == "" or CONFIG.llm_key == "在此填入你的 API Key" then
     state.llm_test_message = "请先填写 API Key"
@@ -969,7 +1090,7 @@ end
 local function init()
   if state.ctx then return true end
   if not reaper.ImGui_CreateContext then
-    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0", 0)
+    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.2", 0)
     return false
   end
   state.ctx = reaper.ImGui_CreateContext("ReaperAI")
@@ -1157,6 +1278,7 @@ local function send_elevenlabs_request(audio_input)
 
   -- Worker 会从 config_file() 读取 LLM 配置；这里确保 UI 中的配置已落盘。
   pcall(save_config)
+  audio_req.output_dir = elevenlabs_output_dir()
   
   local payload = ElevenLabs.request_json(audio_req)
   table.insert(state.messages, {
@@ -1207,19 +1329,60 @@ local function send_elevenlabs_request(audio_input)
             local import_script = ElevenLabs.build_import_script(track_name, wav_path)
             
             local ok, result = pcall(function()
-              local func, err = load(import_script, "elevenlabs_import", "t", {reaper = reaper})
+              local import_env = {
+                reaper = reaper,
+                tostring = tostring,
+                tonumber = tonumber,
+                type = type,
+                string = string,
+                math = math,
+                table = table,
+              }
+              local func, err = load(import_script, "elevenlabs_import", "t", import_env)
               if func then
                 return func()
               else
-                return "导入脚本编译错误: " .. tostring(err)
+                return { ok = false, message = "导入脚本编译错误: " .. tostring(err), path = wav_path, track = track_name }
               end
             end)
             
+            local import_ok = false
+            local import_message = ""
+            local import_detail = ""
             if not ok then
               audio_done_status = "音频导入失败"
+              import_message = tostring(result)
+            elseif type(result) == "table" then
+              import_ok = result.ok == true
+              import_message = tostring(result.message or "")
+              if result.items_added ~= nil then
+                import_detail = import_detail .. "\n新增 item: " .. tostring(result.items_added)
+              end
+              if result.track_items ~= nil then
+                import_detail = import_detail .. "\n目标轨道 item: " .. tostring(result.track_items)
+              end
+              if result.track_index ~= nil then
+                import_detail = import_detail .. "\n轨道编号: " .. tostring(result.track_index)
+              end
+              if result.peaks_built ~= nil then
+                import_detail = import_detail .. "\n波形峰值: " .. (result.peaks_built and "已请求构建" or "未触发")
+              end
+            else
+              import_message = tostring(result)
+              import_ok = not import_message:match("返回 false")
             end
-            msg = ok and ("🎵 " .. tostring(result) .. "\n轨道: " .. track_name) or ("⚠️ 导入失败: " .. tostring(result))
-            if hint and ok then
+
+            if not import_ok then
+              audio_done_status = "音频导入失败"
+            else
+              audio_done_status = "音频已导入工程"
+            end
+            if import_ok then
+              msg = "🎵 " .. import_message .. "\n轨道: " .. track_name .. import_detail
+            else
+              msg = "⚠️ 音频已生成，但导入工程失败: " .. import_message .. "\n文件: " .. tostring(wav_path) .. import_detail
+            end
+            if hint and import_ok then
               msg = msg .. "\n" .. hint
             end
           end
@@ -1238,12 +1401,13 @@ local function send_elevenlabs_request(audio_input)
           })
         end
       end
-      finish_audio_request(audio_done_status)
+      Waiting.finish_audio_request(state, audio_done_status)
       state.scroll = true
       if AsyncPipe and not AsyncPipe.is_busy() then
         state.waiting = false
+        Waiting.clear(state)
         if state.pending_operation then
-          state.status = operation_status_text(state.pending_operation)
+          state.status = Waiting.operation_status(state.pending_operation, state.status)
         else
           state.status = audio_done_status
         end
@@ -1258,9 +1422,7 @@ local function send_elevenlabs_request(audio_input)
     return false
   end
   
-  state.waiting = true
-  begin_audio_request()
-  state.status = "⏳ 正在生成" .. (audio_req.mode == "vox" and " VOX..." or " SFX...")
+  Waiting.begin_audio_request(state, audio_req.mode)
   state.scroll = true
   return true
 end
@@ -1348,6 +1510,7 @@ send_request = function(user_msg, request_opts)
         if not is_current_conversation_epoch(request_epoch) then return end
         -- 回调函数：响应完成时直接处理
         if error then
+          Waiting.clear_operation_placeholder(state)
           table.insert(state.messages, {
             role = "assistant",
             content = "⚠️ 请求失败: " .. error
@@ -1362,11 +1525,14 @@ send_request = function(user_msg, request_opts)
               local queued = queue_operation_for_confirmation(r, effective_user_request)
               if queued == "repairing" then
                 table.remove(state.messages, ai_msg_index)
+              elseif not queued then
+                Waiting.clear_operation_placeholder(state)
               end
             else
               table.insert(state.messages, {role = "assistant", content = strip_intent_block_for_display(r)})
             end
           else
+            Waiting.clear_operation_placeholder(state)
             table.insert(state.messages, {
               role = "assistant",
               content = "⚠️ 解析响应失败: " .. tostring(parse_err or "未知错误")
@@ -1377,8 +1543,9 @@ send_request = function(user_msg, request_opts)
         -- 检查是否还有正在进行的请求
         if AsyncPipe and not AsyncPipe.is_busy() then
           state.waiting = false
+          Waiting.clear(state)
           if state.pending_operation then
-            state.status = operation_status_text(state.pending_operation)
+            state.status = Waiting.operation_status(state.pending_operation, state.status)
           else
             state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
           end
@@ -1392,7 +1559,12 @@ send_request = function(user_msg, request_opts)
     end
     
     state.waiting = true
-    state.status = "⏳ 异步请求已启动..."
+    if state.exec_mode then
+      Waiting.start(state, "exec_plan", effective_user_request)
+      Waiting.show_operation_placeholder(state, effective_user_request)
+    else
+      Waiting.start(state, "chat", effective_user_request)
+    end
     state.scroll = true
     return true
   else
@@ -1415,16 +1587,16 @@ end
 local function check_resp()
   -- v1.0+：异步响应直接在回调中处理，这里只更新状态
   if AsyncPipe and AsyncPipe.is_busy() then
-    -- 更新状态显示进度
-    state.status = AsyncPipe.get_status()
+    Waiting.update(state)
     return nil  -- 继续等待
   end
   
   -- 如果没有正在进行的异步请求，检查是否所有请求已完成
   if state.waiting and AsyncPipe and not AsyncPipe.is_busy() then
     state.waiting = false
+    Waiting.clear(state)
     if state.pending_operation then
-      state.status = operation_status_text(state.pending_operation)
+      state.status = Waiting.operation_status(state.pending_operation, state.status)
     else
       state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
     end
@@ -1452,18 +1624,6 @@ parse_response_content = function(r)
   end
   
   return r
-end
-
--- ============================================
--- 提取 MCP 调用（仅用于摘要/风险统计；执行顺序以 parse_executable_steps 为准）
--- ============================================
-extract_mcp_calls = function(text)
-  local calls = {}
-  local pattern1 = "%[MCP_CALL:([^%]]+)%]"
-  for call in text:gmatch(pattern1) do
-    table.insert(calls, call)
-  end
-  return calls
 end
 
 -- ============================================
@@ -1701,6 +1861,13 @@ local function append_preflight_issue(op, issue)
   op.contract_status = "blocked"
   op.risk = "blocked"
   op.status = "pending"
+end
+
+local function apply_project_fact_preflight(op)
+  if ProjectFacts and type(ProjectFacts.apply_preflight) == "function" then
+    ProjectFacts.apply_preflight(op)
+  end
+  return op
 end
 
 local function apply_runtime_repair_replay_guard(repair_op, parent_op)
@@ -2008,8 +2175,9 @@ local function build_runtime_repair_messages(op, results, attempt)
 end
 
 local function show_operation_card(op, repaired)
+  apply_project_fact_preflight(op)
   state.pending_operation = op
-  state.status = operation_status_text(op)
+  state.status = Waiting.operation_status(op, state.status)
   local content
   if op.needs_clarification then
     content = "AI 需要先确认你的意图，请查看下方澄清卡。"
@@ -2035,6 +2203,7 @@ queue_operation_for_confirmation = function(text, user_msg, repair_attempt)
   if not op then
     return false
   end
+  apply_project_fact_preflight(op)
   repair_attempt = tonumber(repair_attempt or 0) or 0
   local script_can_repair = state.exec_mode and AsyncPipe and op.preflight_ok == false and not op.needs_clarification and
     operation_script_preflight_failure_only(op) and repair_attempt < (CONFIG.script_preflight_repair_max_attempts or 1)
@@ -2059,8 +2228,8 @@ submit_script_preflight_repair_request = function(user_msg, bad_text, op, attemp
 
   attempt = tonumber(attempt or 1) or 1
   state.pending_operation = nil
-  state.waiting = true
-  state.status = "SCRIPT 预检失败，正在自动修复..."
+  Waiting.start(state, "script_repair", user_msg)
+  Waiting.show_operation_placeholder(state, user_msg, { title = "正在自动修复脚本" })
   table.insert(state.messages, {
     role = "assistant",
     content = "🧩 SCRIPT 预检失败，正在自动修复脚本。",
@@ -2102,8 +2271,9 @@ submit_script_preflight_repair_request = function(user_msg, bad_text, op, attemp
       state.scroll = true
       if AsyncPipe and not AsyncPipe.is_busy() then
         state.waiting = false
+        Waiting.clear(state)
         if state.pending_operation then
-          state.status = operation_status_text(state.pending_operation)
+          state.status = Waiting.operation_status(state.pending_operation, state.status)
         else
           state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
         end
@@ -2118,6 +2288,7 @@ submit_script_preflight_repair_request = function(user_msg, bad_text, op, attemp
       is_system = true
     })
     state.waiting = false
+    Waiting.clear(state)
     return show_operation_card(op, false)
   end
 
@@ -2131,8 +2302,8 @@ submit_operation_repair_request = function(user_msg, bad_text, op, attempt)
 
   attempt = tonumber(attempt or 1) or 1
   state.pending_operation = nil
-  state.waiting = true
-  state.status = "计划被阻止，正在自动修复..."
+  Waiting.start(state, "operation_repair", user_msg)
+  Waiting.show_operation_placeholder(state, user_msg, { title = "正在自动修复计划" })
   table.insert(state.messages, {
     role = "assistant",
     content = "🛡 已阻止一个不符合用户需求的执行计划，正在自动修复。",
@@ -2174,8 +2345,9 @@ submit_operation_repair_request = function(user_msg, bad_text, op, attempt)
       state.scroll = true
       if AsyncPipe and not AsyncPipe.is_busy() then
         state.waiting = false
+        Waiting.clear(state)
         if state.pending_operation then
-          state.status = operation_status_text(state.pending_operation)
+          state.status = Waiting.operation_status(state.pending_operation, state.status)
         else
           state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
         end
@@ -2190,6 +2362,7 @@ submit_operation_repair_request = function(user_msg, bad_text, op, attempt)
       is_system = true
     })
     state.waiting = false
+    Waiting.clear(state)
     return show_operation_card(op, false)
   end
 
@@ -2208,8 +2381,8 @@ local function submit_runtime_repair_request(op, results)
   op.runtime_repair_attempt = attempt
 
   state.pending_operation = nil
-  state.waiting = true
-  state.status = "执行失败，正在自动生成修复计划..."
+  Waiting.start(state, "runtime_repair", op.user_request or state.last_user_request or "")
+  Waiting.show_operation_placeholder(state, op.user_request or state.last_user_request or "", { title = "正在修复执行失败" })
   table.insert(state.messages, {
     role = "assistant",
     content = "🔧 执行失败，正在自动生成修复计划。修复后仍会先进入确认卡。",
@@ -2267,8 +2440,9 @@ local function submit_runtime_repair_request(op, results)
       state.scroll = true
       if AsyncPipe and not AsyncPipe.is_busy() then
         state.waiting = false
+        Waiting.clear(state)
         if state.pending_operation then
-          state.status = operation_status_text(state.pending_operation)
+          state.status = Waiting.operation_status(state.pending_operation, state.status)
         else
           state.status = "操作失败"
         end
@@ -2283,6 +2457,7 @@ local function submit_runtime_repair_request(op, results)
       is_system = true
     })
     state.waiting = false
+    Waiting.clear(state)
     return false
   end
 
@@ -2292,6 +2467,13 @@ end
 execute_pending_operation = function()
   local op = state.pending_operation
   if not op then return nil end
+  if op.placeholder then
+    state.status = "执行计划仍在生成中"
+    return op
+  end
+
+  apply_project_fact_preflight(op)
+
   if op.needs_clarification then
     state.status = "Needs clarification"
     table.insert(state.messages, {
@@ -2307,6 +2489,27 @@ execute_pending_operation = function()
     table.insert(state.messages, {
       role = "assistant",
       content = "⚠️ 操作不可执行，请取消后重新生成:\n" .. table.concat(op.preflight_issues or {}, "\n"),
+      is_system = true
+    })
+    state.scroll = true
+    return op
+  end
+
+  apply_project_fact_preflight(op)
+  if op.needs_clarification then
+    state.status = "Needs clarification"
+    table.insert(state.messages, {
+      role = "assistant",
+      content = "工程状态刚刚发生变化，执行前需要重新确认目标。请查看下方澄清卡。",
+      is_system = true
+    })
+    state.scroll = true
+    return op
+  elseif op.preflight_ok == false then
+    state.status = "操作不可执行"
+    table.insert(state.messages, {
+      role = "assistant",
+      content = "⚠️ 工程事实预检未通过，请取消后重新生成:\n" .. table.concat(op.preflight_issues or {}, "\n"),
       is_system = true
     })
     state.scroll = true
@@ -2373,6 +2576,19 @@ cancel_pending_operation = function()
   op.status = "cancelled"
   state.pending_operation = nil
   state.clarification_input_text = ""
+  if op.placeholder then
+    cancel_async_requests()
+    state.waiting = false
+    Waiting.clear(state)
+    table.insert(state.messages, {
+      role = "assistant",
+      content = "已取消正在生成的执行计划。",
+      is_system = true
+    })
+    state.status = "已取消请求"
+    state.scroll = true
+    return
+  end
   table.insert(state.messages, {
     role = "assistant",
     content = "已取消待确认操作。",
@@ -2583,12 +2799,48 @@ local function infer_script_contract(step, op)
     end
   end
 
+  local fact_contract = step and step.script_fact_contract or nil
+  if not fact_contract and Operation and type(Operation.script_fact_contract) == "function" then
+    local ok, inferred = pcall(Operation.script_fact_contract, raw_code, effects)
+    if ok and type(inferred) == "table" then
+      fact_contract = inferred
+      if step then step.script_fact_contract = inferred end
+    end
+  end
+  if fact_contract and fact_contract.endpoint and fact_contract.endpoint ~= "SCRIPT" then
+    local endpoint = tostring(fact_contract.endpoint or "")
+    local contract = Operation.action_contract and Operation.action_contract(endpoint) or nil
+    local fallback = {
+      ["item/create"] = { action = "create", target = "item", verifier = "item/create", verifier_strength = "strong", label = "SCRIPT create/import item" },
+      ["item/delete"] = { action = "delete", target = "item", verifier = "item/delete", verifier_strength = "weak", label = "SCRIPT delete item" },
+      ["item/property"] = { action = "edit", target = "item", verifier = "item/property", verifier_strength = "weak", label = "SCRIPT edit item" },
+      ["marker_region/delete"] = { action = "delete", target = "marker_region", verifier = "marker/delete", verifier_strength = "weak", label = "SCRIPT delete Marker/Region" },
+      ["marker_region/edit"] = { action = "edit", target = "marker_region", verifier = nil, verifier_strength = "observed", label = "SCRIPT edit Marker/Region" },
+    }
+    contract = contract or fallback[endpoint]
+    if contract then
+      return {
+        action = contract.action or action,
+        target = contract.target or fact_contract.target_kind or target,
+        verifier = contract.verifier,
+        verifier_strength = contract.verifier_strength or "observed",
+        effects = effects,
+        label = contract.label or endpoint,
+        source = "script_fact_contract",
+      }
+    end
+  end
+
   if code:match("InsertTrackAtIndex%s*%(") then
     verifier, strength, target, action = "track/create", "strong", "track", "create"
   elseif code:match("DeleteTrack%s*%(") then
     verifier, strength, target, action = "track/delete", "strong", "track", "delete"
   elseif code:match("GetSetMediaTrackInfo_String%s*%(") and raw_code:match("[\"']P_NAME[\"']") then
-    verifier, strength, target, action = "track/rename", "weak", "track", "rename"
+    local rename_args = Operation and Operation.first_call_args and Operation.first_call_args(raw_code, "GetSetMediaTrackInfo_String") or nil
+    local commit_arg = rename_args and tostring(rename_args[4] or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower() or ""
+    if commit_arg == "true" or commit_arg == "1" then
+      verifier, strength, target, action = "track/rename", "weak", "track", "rename"
+    end
   elseif code:match("AddProjectMarker2%s*%(") or code:match("AddProjectMarker%s*%(") then
     verifier, strength, target, action = "marker/add", "strong", "marker", "create"
   elseif code:match("DeleteProjectMarker") then
@@ -3080,14 +3332,6 @@ execute_operation_parts = function(op)
   return #results > 0 and results or nil
 end
 
--- 主处理函数：兼容旧调用；新 Operation Pipeline 直接执行 op.parts。
-process_three_layer = function(text)
-  return execute_operation_parts({
-    raw_text = text,
-    parts = parse_executable_steps(text),
-  })
-end
-
 execute_lua_sandbox = function(code, description, require_result)
   return LuaExecutor.execute_sandbox(code, description, require_result)
 end
@@ -3397,15 +3641,6 @@ execute_mcp_commands = function()
   end
   
   return table.concat(results, "\n"), nil
-end
-
--- ============================================
--- 关闭 MCP 服务器（只走 HTTP/后台启动器，避免控制台窗口）
--- ============================================
-local function shutdown_mcp_server()
-  local resp = MCP.http_post("/shutdown", "{}", 2)
-  local success = resp and resp:find('"success"%s*:%s*true') ~= nil
-  return success == true, success and "优雅关闭请求" or "HTTP 关闭请求失败"
 end
 
 -- ============================================
@@ -4007,6 +4242,7 @@ local function make_ui_context()
     state = state,
     config = CONFIG,
     llm_providers = LlmProviders,
+    elevenlabs = ElevenLabs,
     async_pipe = AsyncPipe,
     callbacks = {
       open_config_editor = open_config_editor,
@@ -4014,6 +4250,7 @@ local function make_ui_context()
       save_config = save_config,
       remember_llm_model = LlmSettings.remember_model,
       refresh_llm_models = LlmSettings.refresh_models,
+      refresh_elevenlabs_voices = ElevenVoiceSettings.refresh_voices,
       test_llm_connection = LlmSettings.test_connection,
       get_local_capability_status = get_local_capability_status,
       run_api_probe = run_api_probe_from_ui,

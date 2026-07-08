@@ -652,6 +652,8 @@ local function operation_mcp_risk(endpoint, params, reasons, scopes)
   return risk
 end
 
+local operation_getset_track_string_writes
+
 local function operation_script_risk(code, reasons, scopes)
   code = tostring(code or "")
   local risk = "medium"
@@ -696,7 +698,7 @@ local function operation_script_risk(code, reasons, scopes)
   elseif code:match("SetMediaItemInfo_Value") or code:match("SplitMediaItem") then
     risk = "medium"
     operation_add_unique(reasons, "SCRIPT 修改素材")
-  elseif code:match("SetMediaTrackInfo_Value") or code:match("GetSetMediaTrackInfo_String") then
+  elseif code:match("SetMediaTrackInfo_Value") or operation_getset_track_string_writes(code) then
     risk = "medium"
     operation_add_unique(reasons, "SCRIPT 修改轨道属性")
   elseif code:match("SetOnlyTrackSelected") or code:match("SetTrackSelected") or code:match("SetMediaItemSelected") then
@@ -914,11 +916,6 @@ local function operation_filter_clarification_choices_and_notes(question, option
   return filtered, note_list
 end
 
-local function operation_filter_clarification_options(question, options, fields, intent_name)
-  local filtered = operation_filter_clarification_choices_and_notes(question, options, {}, fields, intent_name)
-  return filtered
-end
-
 local function operation_parse_llm_intent(text)
   text = tostring(text or "")
   local block = text:match("%[INTENT%](.-)%[/INTENT%]")
@@ -1133,6 +1130,16 @@ local function operation_read_only_conflict_effects(effects)
   return effects.modifies_project or effects.deletes_project or effects.clears_project or effects.exports_file or effects.writes_disk
 end
 
+operation_getset_track_string_writes = function(code)
+  for call in tostring(code or ""):gmatch("GetSetMediaTrackInfo_String%s*(%b())") do
+    local lower_call = call:lower()
+    if lower_call:match(",%s*true%s*%)$") or lower_call:match(",%s*1%s*%)$") then
+      return true
+    end
+  end
+  return false
+end
+
 local function operation_script_effects(code)
   code = tostring(code or "")
   local effects = {
@@ -1197,7 +1204,7 @@ local function operation_script_effects(code)
   if code:match("io%s*%.") or code:match("os%s*%.") then
     effects.writes_disk = true
   end
-  if code:match("SetMediaItemInfo_Value") or code:match("SetMediaTrackInfo_Value") or code:match("GetSetMediaTrackInfo_String") or
+  if code:match("SetMediaItemInfo_Value") or code:match("SetMediaTrackInfo_Value") or operation_getset_track_string_writes(code) or
      code:match("SetProjectMarker") or code:match("AddProjectMarker2%s*%(") or code:match("AddProjectMarker%s*%(") or
      code:match("InsertTrackAtIndex%s*%(") or code:match("InsertMedia%s*%(") or code:match("InsertMediaSection%s*%(") or
      code:match("AddMediaItemToTrack%s*%(") or code:match("TrackFX_AddByName%s*%(") or code:match("TrackFX_Delete%s*%(") or
@@ -1427,10 +1434,6 @@ local function operation_track_index_from_script(code, expr)
     or code:match("local%s+" .. escaped .. "%s*=%s*GetTrack%s*%(%s*0%s*,%s*(%-?%d+)%s*%)")
 end
 
-local function operation_constant_lua_arg(value)
-  return operation_unquote_lua_string(value) or operation_lua_number_literal(value)
-end
-
 local function operation_script_to_mcp_equivalent(code)
   code = tostring(code or "")
   local lower = code:lower()
@@ -1543,6 +1546,363 @@ local function operation_script_to_mcp_equivalent(code)
   end
 
   return nil
+end
+
+local function operation_count_code_hits(code, pattern)
+  local count = 0
+  for _ in tostring(code or ""):gmatch(pattern) do
+    count = count + 1
+  end
+  return count
+end
+
+local function operation_static_for_loop_count(code)
+  code = tostring(code or "")
+  local start_i, end_i = code:match("for%s+[%a_][%w_]*%s*=%s*(%-?%d+)%s*,%s*(%-?%d+)%s*do")
+  if not start_i then
+    start_i, end_i = code:match("for%s+[%a_][%w_]*%s*=%s*(%-?%d+)%s*,%s*(%-?%d+)%s*,%s*1%s*do")
+  end
+  start_i = tonumber(start_i)
+  end_i = tonumber(end_i)
+  if not start_i or not end_i then return nil end
+  return math.max(0, end_i - start_i + 1)
+end
+
+local function operation_var_name(expr)
+  expr = operation_trim_value(expr or "")
+  return expr:match("^([%a_][%w_]*)$")
+end
+
+local function operation_var_assigned_to_reaper_call(code, var, fn_name)
+  var = operation_var_name(var)
+  fn_name = tostring(fn_name or "")
+  if not var or fn_name == "" then return false end
+  local escaped_var = var:gsub("([^%w_])", "%%%1")
+  local escaped_fn = fn_name:gsub("([^%w_])", "%%%1")
+  local patterns = {
+    "local%s+" .. escaped_var .. "%s*=%s*reaper%s*%.%s*" .. escaped_fn .. "%s*%(",
+    "local%s+" .. escaped_var .. "%s*=%s*" .. escaped_fn .. "%s*%(",
+  }
+  for _, pattern in ipairs(patterns) do
+    if tostring(code or ""):match(pattern) then return true end
+  end
+  return false
+end
+
+local function operation_expr_uses_reaper_call(code, expr, fn_name)
+  local raw = tostring(expr or "")
+  local lower_expr = raw:lower()
+  local lower_fn = tostring(fn_name or ""):lower()
+  if lower_fn ~= "" and lower_expr:find(lower_fn, 1, true) then return true end
+  return operation_var_assigned_to_reaper_call(code, raw, fn_name)
+end
+
+local function operation_script_loops_all_tracks(code)
+  local lower = tostring(code or ""):lower()
+  return lower:find("counttracks", 1, true) and lower:find("gettrack", 1, true)
+end
+
+local function operation_script_loops_all_items(code)
+  local lower = tostring(code or ""):lower()
+  return lower:find("countmediaitems", 1, true) and lower:find("getmediaitem", 1, true)
+end
+
+local function operation_script_loops_all_markers(code)
+  local lower = tostring(code or ""):lower()
+  return lower:find("countprojectmarkers", 1, true) or lower:find("enumprojectmarkers", 1, true)
+end
+
+local function operation_track_target_from_script_expr(code, expr)
+  local index = operation_track_index_from_script(code, expr or "")
+  if index then return { index = index }, "index" end
+  if operation_expr_uses_reaper_call(code, expr, "GetSelectedTrack") or tostring(code or ""):lower():find("countselectedtracks", 1, true) then
+    return { selected = "true" }, "selected"
+  end
+  if operation_script_loops_all_tracks(code) then
+    return { all = "true" }, "all"
+  end
+  return {}, nil
+end
+
+local function operation_item_index_from_script_expr(code, expr)
+  expr = operation_trim_value(expr or "")
+  local index = expr:match("GetMediaItem%s*%(%s*0%s*,%s*(%-?%d+)%s*%)")
+  if index then return index end
+  index = expr:match("reaper%s*%.%s*GetMediaItem%s*%(%s*0%s*,%s*(%-?%d+)%s*%)")
+  if index then return index end
+  local var = operation_var_name(expr)
+  if not var then return nil end
+  local escaped = var:gsub("([^%w_])", "%%%1")
+  return tostring(code or ""):match("local%s+" .. escaped .. "%s*=%s*reaper%s*%.%s*GetMediaItem%s*%(%s*0%s*,%s*(%-?%d+)%s*%)")
+    or tostring(code or ""):match("local%s+" .. escaped .. "%s*=%s*GetMediaItem%s*%(%s*0%s*,%s*(%-?%d+)%s*%)")
+end
+
+local function operation_item_target_from_script_expr(code, expr)
+  local index = operation_item_index_from_script_expr(code, expr or "")
+  if index then return { index = index }, "index" end
+  if operation_expr_uses_reaper_call(code, expr, "GetSelectedMediaItem") or tostring(code or ""):lower():find("countselectedmediaitems", 1, true) then
+    return { selected = "true" }, "selected"
+  end
+  if operation_script_loops_all_items(code) then
+    return { all = "true" }, "all"
+  end
+  return {}, nil
+end
+
+local function operation_script_contract_result(endpoint, params, target_kind, target_source, confidence, opts)
+  opts = opts or {}
+  params = params or {}
+  local requires_target = opts.requires_target == true
+  local missing_target = requires_target and not target_source and not params.all
+  return {
+    endpoint = endpoint,
+    params = params,
+    target_kind = target_kind,
+    target_source = target_source,
+    confidence = confidence or "weak",
+    planned_count = opts.planned_count,
+    destructive = opts.destructive == true,
+    modifies_project = opts.modifies_project == true,
+    writes_disk = opts.writes_disk == true,
+    read_only = opts.read_only == true,
+    opaque_side_effect = opts.opaque_side_effect == true,
+    needs_target_clarification = missing_target,
+    reason = opts.reason or (missing_target and "script target is not statically clear" or nil),
+    question = opts.question,
+    fields = opts.fields,
+    placeholder = opts.placeholder,
+  }
+end
+
+local function operation_project_marker_is_region_arg(value)
+  local v = operation_trim_value(value):lower()
+  if v == "true" or v == "1" then return true end
+  if v == "false" or v == "0" then return false end
+  return nil
+end
+
+local function operation_lua_truthy_literal(value)
+  local v = operation_trim_value(value):lower()
+  return v == "true" or v == "1"
+end
+
+local function operation_script_fact_contract(code, known_effects)
+  code = tostring(code or "")
+  local effects = known_effects
+  if not effects then
+    local meta = operation_script_effects(code)
+    effects = meta and meta.effects or {}
+  end
+
+  if code:match("InsertTrackAtIndex%s*%(") then
+    local hits = operation_count_code_hits(code, "InsertTrackAtIndex%s*%(")
+    local loop_count = operation_static_for_loop_count(code)
+    return operation_script_contract_result("track/create", { count = tostring(loop_count or math.max(1, hits)) }, "track", "create", "strong", {
+      planned_count = loop_count or math.max(1, hits),
+      modifies_project = true,
+      requires_target = false,
+      reason = "script creates tracks",
+    })
+  end
+
+  local args = operation_first_call_args(code, "DeleteTrack")
+  if args and #args >= 1 then
+    local params, source = operation_track_target_from_script_expr(code, args[1])
+    return operation_script_contract_result("track/delete", params, "track", source, source and "strong" or "weak", {
+      destructive = true,
+      modifies_project = true,
+      requires_target = true,
+      question = "这个 SCRIPT 会删除轨道，但无法静态确认目标轨道。请说明要删除哪个轨道。",
+      fields = { "track_target" },
+      placeholder = "输入轨道名、索引，或先选中轨道",
+    })
+  end
+
+  args = operation_first_call_args(code, "GetSetMediaTrackInfo_String")
+  if args and #args >= 4 and operation_unquote_lua_string(args[2]) == "P_NAME" and operation_lua_truthy_literal(args[4]) then
+    local params, source = operation_track_target_from_script_expr(code, args[1])
+    return operation_script_contract_result("track/rename", params, "track", source, source and "strong" or "weak", {
+      modifies_project = true,
+      requires_target = true,
+      question = "这个 SCRIPT 会重命名轨道，但无法静态确认目标轨道。请说明要重命名哪条轨道。",
+      fields = { "track_target" },
+      placeholder = "输入轨道名、索引，或先选中轨道",
+    })
+  end
+
+  args = operation_first_call_args(code, "SetMediaTrackInfo_Value")
+  if args and #args >= 2 then
+    local params, source = operation_track_target_from_script_expr(code, args[1])
+    return operation_script_contract_result("track/set_volume", params, "track", source, source and "strong" or "weak", {
+      modifies_project = true,
+      requires_target = true,
+      question = "这个 SCRIPT 会修改轨道属性，但无法静态确认目标轨道。请说明要修改哪条轨道。",
+      fields = { "track_target" },
+      placeholder = "输入轨道名、索引，或先选中轨道",
+    })
+  end
+
+  args = operation_first_call_args(code, "SetTrackColor")
+  if args and #args >= 1 then
+    local params, source = operation_track_target_from_script_expr(code, args[1])
+    return operation_script_contract_result("track/set_color", params, "track", source, source and "strong" or "weak", {
+      modifies_project = true,
+      requires_target = true,
+      question = "这个 SCRIPT 会设置轨道颜色，但无法静态确认目标轨道。请说明要设置哪条轨道。",
+      fields = { "track_target" },
+      placeholder = "输入轨道名、索引，或先选中轨道",
+    })
+  end
+
+  args = operation_first_call_args(code, "TrackFX_AddByName")
+  if args and #args >= 1 then
+    local params, source = operation_track_target_from_script_expr(code, args[1])
+    return operation_script_contract_result("track/add_fx", params, "track", source, source and "strong" or "weak", {
+      modifies_project = true,
+      requires_target = true,
+      question = "这个 SCRIPT 会给轨道添加 FX，但无法静态确认目标轨道。请说明要作用到哪条轨道。",
+      fields = { "track_target" },
+      placeholder = "输入轨道名、索引，或先选中轨道",
+    })
+  end
+
+  args = operation_first_call_args(code, "TrackFX_Delete")
+  if args and #args >= 1 then
+    local params, source = operation_track_target_from_script_expr(code, args[1])
+    return operation_script_contract_result("track/remove_fx", params, "track", source, source and "strong" or "weak", {
+      destructive = true,
+      modifies_project = true,
+      requires_target = true,
+      question = "这个 SCRIPT 会移除轨道 FX，但无法静态确认目标轨道。请说明要作用到哪条轨道。",
+      fields = { "track_target" },
+      placeholder = "输入轨道名、索引，或先选中轨道",
+    })
+  end
+
+  args = operation_first_call_args(code, "DeleteTrackMediaItem")
+  if args and #args >= 2 then
+    local params, source = operation_item_target_from_script_expr(code, args[2])
+    return operation_script_contract_result("item/delete", params, "item", source, source and "strong" or "weak", {
+      destructive = true,
+      modifies_project = true,
+      requires_target = true,
+      question = "这个 SCRIPT 会删除 item，但无法静态确认目标素材。请说明要删除哪个 item。",
+      fields = { "item_target" },
+      placeholder = "输入 item 名称/索引，或先选中素材",
+    })
+  end
+
+  args = operation_first_call_args(code, "SetMediaItemInfo_Value") or operation_first_call_args(code, "SplitMediaItem")
+  if args and #args >= 1 then
+    local params, source = operation_item_target_from_script_expr(code, args[1])
+    return operation_script_contract_result("item/property", params, "item", source, source and "strong" or "weak", {
+      modifies_project = true,
+      requires_target = true,
+      question = "这个 SCRIPT 会修改 item，但无法静态确认目标素材。请说明要处理哪个 item。",
+      fields = { "item_target" },
+      placeholder = "输入 item 名称/索引，或先选中素材",
+    })
+  end
+
+  if code:match("InsertMedia%s*%(") or code:match("InsertMediaSection%s*%(") or code:match("AddMediaItemToTrack%s*%(") then
+    return operation_script_contract_result("item/create", { count = "1" }, "item", "create", "weak", {
+      planned_count = 1,
+      modifies_project = true,
+      requires_target = false,
+      reason = "script creates/imports items",
+    })
+  end
+
+  args = operation_first_call_args(code, "DeleteProjectMarker")
+  if args and #args >= 3 then
+    local is_region = operation_project_marker_is_region_arg(args[3])
+    local index = operation_lua_integer_literal(args[2])
+    local params = index and { index = index } or (operation_script_loops_all_markers(code) and { all = "true" } or {})
+    if is_region == true then
+      return operation_script_contract_result("region/delete", params, "region", index and "index" or (params.all and "all" or nil), "weak", {
+        destructive = true,
+        modifies_project = true,
+        requires_target = not params.all,
+        question = "这个 SCRIPT 会删除 Region，但无法静态确认目标。请说明要删除哪些 Region。",
+        fields = { "region_target" },
+        placeholder = "输入 R 编号/范围，或说明按时间线顺序",
+      })
+    elseif is_region == false then
+      return operation_script_contract_result("marker/delete", params, "marker", index and "index" or (params.all and "all" or nil), "weak", {
+        destructive = true,
+        modifies_project = true,
+        requires_target = not params.all,
+        question = "这个 SCRIPT 会删除 Marker，但无法静态确认目标。请说明要删除哪个 Marker。",
+        fields = { "marker_target" },
+        placeholder = "输入 Marker 编号",
+      })
+    end
+  elseif code:match("DeleteProjectMarker") and operation_script_loops_all_markers(code) then
+    return operation_script_contract_result("marker_region/delete", { all = "true" }, "marker_region", "all", "weak", {
+      destructive = true,
+      modifies_project = true,
+      requires_target = false,
+      reason = "script deletes marker or region objects",
+    })
+  end
+
+  if code:match("SetProjectMarker") then
+    local params = operation_script_loops_all_markers(code) and { all = "true" } or {}
+    return operation_script_contract_result("marker_region/edit", params, "marker_region", params.all and "all" or nil, "weak", {
+      modifies_project = true,
+      requires_target = not params.all,
+      question = "这个 SCRIPT 会修改 Marker/Region，但无法静态确认目标。请说明要修改哪个 Marker 或 Region。",
+      fields = { "marker_region_target" },
+      placeholder = "输入 Marker/Region 编号或名称",
+    })
+  end
+
+  if code:match("AddProjectMarker2%s*%(") or code:match("AddProjectMarker%s*%(") then
+    return operation_script_contract_result("marker/add", { count = "1" }, "marker", "create", "strong", {
+      planned_count = 1,
+      modifies_project = true,
+      requires_target = false,
+      reason = "script adds marker or region",
+    })
+  end
+
+  if operation_expr_uses_reaper_call(code, "env", "GetSelectedEnvelope") or code:lower():find("getselectedenvelope", 1, true) then
+    if code:match("DeleteEnvelopePoint") then
+      return operation_script_contract_result("envelope/clear", { target = "selected_envelope" }, "envelope", "selected", "weak", {
+        destructive = true,
+        modifies_project = true,
+        requires_target = false,
+      })
+    elseif code:match("InsertEnvelopePoint") then
+      return operation_script_contract_result("envelope/draw", { target = "selected_envelope" }, "envelope", "selected", "weak", {
+        modifies_project = true,
+        requires_target = false,
+      })
+    end
+  end
+
+  if effects and effects.read_only then
+    return operation_script_contract_result("SCRIPT", {}, "query", nil, "observed", {
+      read_only = true,
+      requires_target = false,
+    })
+  end
+
+  if effects and (effects.modifies_project or effects.deletes_project or effects.clears_project or effects.writes_disk or effects.exports_file) then
+    return operation_script_contract_result("SCRIPT", {}, "unknown", nil, "opaque", {
+      opaque_side_effect = true,
+      destructive = effects.deletes_project or effects.clears_project or effects.deletes_disk,
+      modifies_project = effects.modifies_project,
+      writes_disk = effects.writes_disk or effects.exports_file,
+      requires_target = false,
+      reason = "opaque side-effect script",
+    })
+  end
+
+  return operation_script_contract_result("SCRIPT", {}, "query", nil, "observed", {
+    read_only = true,
+    requires_target = false,
+  })
 end
 
 local function operation_trim(value)
@@ -2388,6 +2748,22 @@ local function operation_collect_contract_clarifications(steps, user_text, inten
           ))
         end
       end
+    elseif step.kind == "script" then
+      local script_contract = step.script_fact_contract
+      if script_contract and script_contract.needs_target_clarification then
+        table.insert(clarifications, operation_clarification(
+          step,
+          i,
+          script_contract.question or "这个 SCRIPT 会修改工程，但无法静态确认目标。请说明要操作哪个对象。",
+          {},
+          script_contract.reason or "script mutation target is unclear",
+          {
+            fields = script_contract.fields or { tostring(script_contract.target_kind or "target") .. "_target" },
+            free_input = true,
+            placeholder = script_contract.placeholder or "输入目标名称、编号，或先在 REAPER 里选中目标"
+          }
+        ))
+      end
     end
   end
   return clarifications
@@ -2459,6 +2835,10 @@ local function operation_compile_plan(steps, user_text, llm_intent)
       step.action = meta.action
       step.action_label = meta.label
       step.effects = meta.effects or {}
+      step.script_fact_contract = operation_script_fact_contract(step.code or "", step.effects)
+      if step.script_fact_contract then
+        step.endpoint = "SCRIPT:" .. tostring(step.script_fact_contract.endpoint or "unknown")
+      end
     else
       meta = { action = "custom", label = tostring(step.kind or "unknown"), effects = {} }
       step.action = meta.action
@@ -2854,6 +3234,7 @@ Operation.preflight_execution_steps = operation_preflight_execution_steps
 Operation.endpoint = operation_endpoint
 Operation.parse_call = operation_parse_call
 Operation.build_call = operation_build_call
+Operation.first_call_args = operation_first_call_args
 Operation.action_registry = operation_action_registry
 Operation.action_registry_table = ACTION_REGISTRY
 Operation.action_contract = operation_action_contract
@@ -2869,6 +3250,7 @@ Operation.script_risk = operation_script_risk
 Operation.parse_llm_intent = operation_parse_llm_intent
 Operation.infer_user_intent = operation_infer_user_intent
 Operation.script_effects = operation_script_effects
+Operation.script_fact_contract = operation_script_fact_contract
 Operation.compile_plan = operation_compile_plan
 Operation.preflight_steps = operation_preflight_steps
 Operation.analyze_steps = operation_analyze_steps

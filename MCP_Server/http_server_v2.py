@@ -398,9 +398,6 @@ def load_reaper_api_inventory():
     print(f"[API_GATE] Using core API inventory allowlist with {len(_REAPER_API_WHITELIST_CACHE)} REAPER APIs")
     return _REAPER_API_WHITELIST_CACHE, _REAPER_API_WHITELIST_SOURCE
 
-def load_reaper_api_whitelist():
-    return load_reaper_api_inventory()
-
 def reaper_action_inventory_candidates():
     paths = []
     resource_path = CONFIG.get("reaper_resource_path") or ""
@@ -2128,14 +2125,6 @@ def _parse_envelope_value(value, lane='volume', default=0.0):
         return float(s)
     except (TypeError, ValueError):
         return default
-
-def _track_envelope_action(lane):
-    lane = _lane_kind(lane)
-    if lane == 'pan':
-        return 40407
-    if lane == 'mute':
-        return 40867
-    return 40406
 
 def _envelope_lua_helpers():
     return r'''
@@ -4239,16 +4228,6 @@ local function export_mixdown()
             pattern = pattern .. "_$track"
         end
         return pattern
-    end
-
-    local function expected_track_path(target, render_pattern)
-        local base = tostring(render_pattern or "")
-        base = base:gsub("%$tracknumber", tostring((target.index or 0) + 1))
-        base = base:gsub("%$track", sanitize_export_filename(target.name or "Track"))
-        base = base:gsub("%$source", source_type)
-        base = sanitize_export_filename(base)
-        if base == "" then base = sanitize_export_filename(target.name or "Track") end
-        return path_join(output_path, base .. "." .. ext)
     end
 
     local function split_render_targets(value)
