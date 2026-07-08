@@ -177,14 +177,11 @@ end
 
 local function elevenlabs_track_name(mode, candidate, req)
   mode = (mode == "vox") and "vox" or "sfx"
-  local prefix = (mode == "vox") and "11_VOX_" or "11_SFX_"
   local base = strip_audio_track_prefix(candidate or "")
-  if base == "" then
-    base = (mode == "vox") and infer_vox_track_label(req) or infer_sfx_track_label(req.prompt or req.source_text or "")
+  if base ~= "" then
+    return safe_track_name(base, (mode == "vox") and "ElevenLabs VOX" or "ElevenLabs SFX")
   end
-  base = normalize_label_text(base)
-  if base == "" then base = (mode == "vox") and "Voice" or "SFX" end
-  return safe_track_name(prefix .. base, prefix .. ((mode == "vox") and "Voice" or "SFX"))
+  return (mode == "vox") and "ElevenLabs VOX" or "ElevenLabs SFX"
 end
 
 local function contains_any(text, words)
@@ -257,6 +254,7 @@ local function parse_audio_shortcut(text)
     spoken_text = "",
     gender = "",
     track_name = "",
+    semantic_parse = false,
   }
 
   local explicit_vox = lower:match("^vox[%s:：_-]*(.*)$") or lower:match("^voice[%s:：_-]*(.*)$")
@@ -284,6 +282,7 @@ local function parse_audio_shortcut(text)
     req.voice_style = style
     req.spoken_text = spoken
     req.gender = infer_audio_gender(style) or ""
+    req.semantic_parse = true
   else
     req.prompt = body
   end
@@ -309,7 +308,9 @@ function ElevenLabs.normalize_request(input)
     req.voice_style = trim_text(req.voice_style or req.style or "")
     req.spoken_text = trim_text(req.spoken_text or req.text or req.prompt or "")
     req.gender = tostring(req.gender or infer_audio_gender(req.voice_style) or ""):lower()
-    if req.gender ~= "male" and req.gender ~= "female" then
+    if req.semantic_parse and req.gender ~= "male" and req.gender ~= "female" then
+      req.gender = ""
+    elseif req.gender ~= "male" and req.gender ~= "female" then
       req.gender = infer_audio_gender(req.voice_style) or "female"
     end
     req.track_name = elevenlabs_track_name("vox", req.track_name, req)
@@ -332,6 +333,7 @@ function ElevenLabs.request_json(req)
     ',"voice_style":', json_string(req.voice_style or ""),
     ',"spoken_text":', json_string(req.spoken_text or ""),
     ',"source_text":', json_string(req.source_text or ""),
+    ',"semantic_parse":', (req.semantic_parse and "true" or "false"),
     "}"
   }
   return table.concat(parts)
@@ -339,6 +341,9 @@ end
 
 function ElevenLabs.start_message(req)
   if req.mode == "vox" then
+    if req.semantic_parse then
+      return "正在解析并生成 VOX: " .. tostring(req.source_text or req.spoken_text or "")
+    end
     local style = trim_text(((req.gender == "male") and "男声" or "女声") .. " " .. tostring(req.voice_style or ""))
     return "正在生成 VOX: " .. tostring(req.spoken_text or "") .. "\n声音: " .. style
   end

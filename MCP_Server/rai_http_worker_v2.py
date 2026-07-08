@@ -431,14 +431,14 @@ def extract_voice_preference(text):
         "沙哑", "磁性", "粗犷", "沧桑", "有力",
         "播音", "新闻", "正式", "播报",
         "老年", "老人",
-        "低沉", "轻声", "柔和",
+        "低沉", "轻声", "柔和", "大喊", "喊叫", "喊", "吼",
         "澳大利亚", "澳洲",
         "sweet", "gentle", "cute", "soft",
         "husky", "raspy", "rough", "powerful",
         "mature", "calm", "elegant",
         "young", "youthful", "energetic",
         "news", "anchor", "formal", "serious",
-        "old", "elder",
+        "old", "elder", "shout", "shouting", "yell", "yelling", "scream",
         "deep", "standard", "default",
         "australian", "accent",
     ]
@@ -468,7 +468,12 @@ def extract_voice_preference(text):
         for kw in found_prefs:
             clean_text = clean_text.replace(kw, "")
         # 移除常见引导词
-        clean_text = re.sub(r"用|让|语音|声|说|读|念|voice|say|read|speak", "", clean_text, flags=re.IGNORECASE)
+        clean_text = re.sub(
+            r"用|让|语音|声音|声|说|读|念|男生|男声|男性|女生|女声|女性|voice|say|read|speak|male|female|man|woman|boy|girl",
+            "",
+            clean_text,
+            flags=re.IGNORECASE,
+        )
         clean_text = clean_text.strip()
         
         return preference, clean_text if clean_text else text
@@ -684,6 +689,111 @@ def _has_chinese(text):
     return False
 
 
+def _json_object_from_text(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        log(f"解析 VOX LLM JSON 失败: {e}; content={text[:300]}")
+        return None
+
+
+def parse_vox_request_by_llm(api_url, api_key, model, user_text, fallback_req=None):
+    """Use the configured LLM to extract a natural-language 11vox request."""
+    if not api_key or api_key == "在此填入你的 API Key":
+        return None
+
+    fallback_req = fallback_req or {}
+    user_text = _trim_audio_text(user_text)
+    if not user_text:
+        return None
+
+    system_prompt = """You extract parameters for ElevenLabs text-to-speech.
+Return only one compact JSON object. Do not explain.
+
+Schema:
+{
+  "spoken_text": "the exact words ElevenLabs should speak",
+  "gender": "male|female|",
+  "voice_style": "short voice/performance description",
+  "track_name": ""
+}
+
+Rules:
+- Understand Chinese and English natural language.
+- Do not include instruction words such as 男生, 女声, 大喊, say, read, 用...说 in spoken_text.
+- Preserve the language of the words that should be spoken. Do not translate spoken_text unless the user explicitly asks for translation.
+- Put acting directions such as 大喊, whispering, angry, urgent, calm into voice_style, not spoken_text.
+- If the user clearly asks for a male voice, gender is male. If clearly female, gender is female. Otherwise use empty string.
+- track_name should usually be empty unless the user explicitly names the track."""
+
+    fallback_summary = {
+        "source_text": fallback_req.get("source_text") or "",
+        "spoken_text": fallback_req.get("spoken_text") or "",
+        "gender": fallback_req.get("gender") or "",
+        "voice_style": fallback_req.get("voice_style") or "",
+    }
+    user_prompt = f"""User 11vox request:
+{user_text}
+
+Current rough parse:
+{json.dumps(fallback_summary, ensure_ascii=False)}
+
+Examples:
+Input: 11vox 男生大喊 fire in the hole
+Output: {{"spoken_text":"fire in the hole","gender":"male","voice_style":"shouting, urgent","track_name":""}}
+
+Input: 11vox 女声温柔说 欢迎回来
+Output: {{"spoken_text":"欢迎回来","gender":"female","voice_style":"gentle, warm","track_name":""}}
+
+Input: 11vox 用老人大声喊 Run!
+Output: {{"spoken_text":"Run!","gender":"male","voice_style":"elderly, loud, shouting","track_name":""}}
+
+Now output JSON for the user request."""
+
+    result = make_api_request(api_url, api_key, model, [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ])
+    if not result.get("success"):
+        log(f"VOX 语义抽取 LLM 失败: {result.get('error')}")
+        return None
+
+    data = _json_object_from_text(result.get("content", ""))
+    if not data:
+        return None
+
+    spoken_text = _trim_audio_text(data.get("spoken_text") or data.get("text") or "")
+    if not spoken_text:
+        return None
+
+    gender = str(data.get("gender") or "").strip().lower()
+    if gender not in ("male", "female"):
+        gender = ""
+
+    voice_style = _trim_audio_text(data.get("voice_style") or data.get("style") or "")
+    performance = _trim_audio_text(data.get("performance") or "")
+    if performance and performance.lower() not in voice_style.lower():
+        voice_style = (voice_style + ", " + performance).strip(" ,")
+
+    return {
+        "spoken_text": spoken_text,
+        "gender": gender,
+        "voice_style": voice_style,
+        "track_name": _trim_audio_text(data.get("track_name") or ""),
+    }
+
+
 def parse_audio_request_payload(raw_text):
     """解析 Lua 传入的 11Lab 请求。
 
@@ -716,6 +826,7 @@ def parse_audio_request_payload(raw_text):
                     "voice_style": voice_style,
                     "spoken_text": _trim_audio_text(data.get("spoken_text") or data.get("text") or ""),
                     "source_text": _trim_audio_text(data.get("source_text") or ""),
+                    "semantic_parse": bool(data.get("semantic_parse")),
                 }
         except Exception as e:
             log(f"解析 11Lab JSON 请求失败，将按旧文本处理: {e}")
@@ -744,6 +855,7 @@ def parse_audio_request_payload(raw_text):
             "voice_style": voice_style,
             "spoken_text": spoken_text,
             "source_text": text,
+            "semantic_parse": bool(explicit_vox),
         }
 
     return {
@@ -755,6 +867,7 @@ def parse_audio_request_payload(raw_text):
         "voice_style": "",
         "spoken_text": "",
         "source_text": text,
+        "semantic_parse": False,
     }
 
 
@@ -1158,6 +1271,34 @@ def main():
         audio_req = parse_audio_request_payload(text_content)
         
         if audio_req["mode"] == "vox":
+            llm_url = config.get("llm_url")
+            llm_key = config.get("llm_key")
+            llm_model = config.get("llm_model")
+
+            if audio_req.get("semantic_parse"):
+                source_for_parse = audio_req.get("source_text") or audio_req.get("spoken_text") or ""
+                parsed_vox = parse_vox_request_by_llm(llm_url, llm_key, llm_model, source_for_parse, audio_req)
+                if parsed_vox:
+                    audio_req["spoken_text"] = parsed_vox.get("spoken_text") or audio_req.get("spoken_text") or ""
+                    audio_req["gender"] = parsed_vox.get("gender") or audio_req.get("gender") or ""
+                    audio_req["voice_style"] = parsed_vox.get("voice_style") or audio_req.get("voice_style") or ""
+                    if parsed_vox.get("track_name") and not audio_req.get("track_name"):
+                        audio_req["track_name"] = parsed_vox.get("track_name")
+                    log(
+                        "VOX 语义抽取: "
+                        f"source='{source_for_parse}', spoken='{audio_req.get('spoken_text')}', "
+                        f"gender='{audio_req.get('gender')}', style='{audio_req.get('voice_style')}'"
+                    )
+                else:
+                    # Lightweight fallback for offline or unavailable LLM. The main path above is LLM-based.
+                    fallback_pref, fallback_text = extract_voice_preference(source_for_parse)
+                    if fallback_text and fallback_text != source_for_parse:
+                        audio_req["spoken_text"] = fallback_text
+                    if fallback_pref and not audio_req.get("voice_style"):
+                        audio_req["voice_style"] = fallback_pref
+                    if not audio_req.get("gender"):
+                        audio_req["gender"] = _infer_gender_from_text(fallback_pref or source_for_parse)
+
             # 语音模式：TTS（把文字读出来）
             # v1.0+ 智能 Voice 选择
             clean_text = audio_req.get("spoken_text") or ""
@@ -1181,9 +1322,6 @@ def main():
             
             # 2. 关键词匹配不到，且 LLM 配置可用 → 调用 LLM 兜底
             if not voice_id:
-                llm_url = config.get("llm_url")
-                llm_key = config.get("llm_key")
-                llm_model = config.get("llm_model")
                 if llm_key and llm_key != "在此填入你的 API Key" and preference:
                     voice_id = select_voice_by_llm(llm_url, llm_key, llm_model, preference, preferred_gender)
             
