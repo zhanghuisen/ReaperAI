@@ -32,24 +32,18 @@ local function operation_mcp_call_end(text, start_pos)
   text = tostring(text or "")
   start_pos = tonumber(start_pos or 1) or 1
   local i = start_pos + 10
+  local bracket_depth = 0
   while i <= #text do
     local c = text:sub(i, i)
     if c == "\r" or c == "\n" then
       return nil
     end
-    if c == "]" then
-      local call_prefix = text:sub(start_pos + 10, i - 1):lower():gsub("%s+$", "")
-      local closes_created_ref =
-        call_prefix:match("(created%.tracks%[%d+)$") or
-        call_prefix:match("(created%.items%[%d+)$") or
-        call_prefix:match("(created%.markers%[%d+)$") or
-        call_prefix:match("(generated%.tracks%[%d+)$") or
-        call_prefix:match("(generated%.items%[%d+)$") or
-        call_prefix:match("(generated%.markers%[%d+)$") or
-        call_prefix:match("(created%.fx%[%d+)$") or
-        call_prefix:match("(generated%.fx%[%d+)$") or
-        call_prefix:match("(added%.fx%[%d+)$")
-      if not closes_created_ref then
+    if c == "[" then
+      bracket_depth = bracket_depth + 1
+    elseif c == "]" then
+      if bracket_depth > 0 then
+        bracket_depth = bracket_depth - 1
+      else
         return i
       end
     end
