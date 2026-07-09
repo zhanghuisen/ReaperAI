@@ -1,11 +1,11 @@
 --[[
-  ReaperAI v1.0.2 - 智能助手
+  ReaperAI v1.0.3 - 智能助手
   
   作者：zhanghuisen
   
   前置要求：ReaImGui（通过 ReaPack 安装）
   
-  版本：1.0.2 (2026-07-09)
+  版本：1.0.3 (2026-07-09)
   核心特性：
   - 异步 HTTP：使用后台 worker，不阻塞 REAPER UI
   - 智能助手：支持咨询与操作双模式
@@ -207,6 +207,8 @@ local state = {
   audio_status   = "就绪",
   audio_wait_kind = "",
   audio_started_at = 0,
+  chat_stream_active = false,
+  stream_typewriter_update = nil,
   audio_sfx_track_name = "",
   audio_sfx_prompt = "",
   audio_vox_gender = "female",
@@ -259,6 +261,11 @@ local state = {
   pending_operation = nil, -- Operation Model 阶段1：待确认操作
   clarification_input_text = "",
   last_user_request = nil,
+  last_retry_request = nil,
+  last_retry_effective_request = nil,
+  active_generation_message_ref = nil,
+  active_generation_request = nil,
+  active_generation_effective_request = nil,
   last_ai_operation = nil, -- 最近一次已执行的 AI 操作
   runtime_generated_registry = nil,
   conversation_epoch = 0,
@@ -329,6 +336,11 @@ local function reset_conversation_state(reason, opts)
   state.pending_operation = nil
   state.last_ai_operation = nil
   state.last_user_request = nil
+  state.last_retry_request = nil
+  state.last_retry_effective_request = nil
+  state.active_generation_message_ref = nil
+  state.active_generation_request = nil
+  state.active_generation_effective_request = nil
   state.clarification_input_text = ""
   state.runtime_generated_registry = nil
   state.audio_waiting = false
@@ -336,6 +348,8 @@ local function reset_conversation_state(reason, opts)
   state.audio_status = "就绪"
   state.audio_wait_kind = ""
   state.audio_started_at = 0
+  state.chat_stream_active = false
+  state.stream_typewriter_update = nil
   state.scroll = true
   if opts.status then
     state.status = opts.status
@@ -748,7 +762,7 @@ local function save_config()
   end
 
   f:write(table.concat({
-    "# ReaperAI v1.0.2 配置文件",
+    "# ReaperAI v1.0.3 配置文件",
     "# 格式: KEY=VALUE",
     "# 现在推荐在 ReaperAI 设置面板中编辑，文件仅作为本地存储。",
     "# 支持配置项: LLM_PROVIDER, LLM_API_KEY, LLM_API_URL, LLM_MODEL, LLM_RECENT_MODELS, ELEVENLABS_API_KEY",
@@ -1090,7 +1104,7 @@ end
 local function init()
   if state.ctx then return true end
   if not reaper.ImGui_CreateContext then
-    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.2", 0)
+    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.3", 0)
     return false
   end
   state.ctx = reaper.ImGui_CreateContext("ReaperAI")
@@ -1121,6 +1135,485 @@ local function strip_intent_block_for_display(text)
     return "已生成操作卡，请在下方确认或澄清。"
   end
   return text
+end
+
+function reaperai_stream_take_utf8_chars(text, max_chars)
+  text = tostring(text or "")
+  max_chars = math.max(0, math.floor(tonumber(max_chars or 0) or 0))
+  if max_chars <= 0 or text == "" then return "", text, 0 end
+
+  local i = 1
+  local taken = 0
+  local len = #text
+  while i <= len and taken < max_chars do
+    local b = text:byte(i) or 0
+    local step = 1
+    if b >= 0xF0 then
+      step = 4
+    elseif b >= 0xE0 then
+      step = 3
+    elseif b >= 0xC0 then
+      step = 2
+    end
+    if i + step - 1 > len then break end
+    i = i + step
+    taken = taken + 1
+  end
+
+  if taken <= 0 then return "", text, 0 end
+  return text:sub(1, i - 1), text:sub(i), taken
+end
+
+function reaperai_mark_retryable_message(msg, request_text, effective_request)
+  if not msg then return nil end
+  local request = tostring(request_text or effective_request or state.last_user_request or "")
+  local effective = tostring(effective_request or request or "")
+  if request == "" then return msg end
+  msg.retryable = true
+  msg.request_text = request
+  msg.effective_user_request = effective ~= "" and effective or request
+  state.last_retry_request = request
+  state.last_retry_effective_request = msg.effective_user_request
+  return msg
+end
+
+function reaperai_message_index_by_ref(ref)
+  if not ref then return nil end
+  for i, msg in ipairs(state.messages or {}) do
+    if msg == ref then return i end
+  end
+  return nil
+end
+
+function reaperai_apply_tool_call_event(msg, event)
+  if not msg or not event then return end
+  msg.tool_calls = msg.tool_calls or {}
+  local key = tostring(event.index or "")
+  if key == "" then key = tostring(event.id or "") end
+  if key == "" then key = tostring(#msg.tool_calls + 1) end
+
+  local tool = nil
+  for _, item in ipairs(msg.tool_calls) do
+    if tostring(item.key or "") == key then
+      tool = item
+      break
+    end
+  end
+  if not tool then
+    tool = { key = key, name = "", arguments = "", call_type = tostring(event.call_type or "tool") }
+    table.insert(msg.tool_calls, tool)
+  end
+
+  local name = tostring(event.name or "")
+  local arguments = tostring(event.arguments or "")
+  if name ~= "" then tool.name = name end
+  if arguments ~= "" then tool.arguments = tostring(tool.arguments or "") .. arguments end
+  tool.id = tostring(event.id or tool.id or "")
+  tool.call_type = tostring(event.call_type or tool.call_type or "tool")
+  msg.advanced_status = "工具调用: " .. ((tool.name and tool.name ~= "") and tool.name or tool.call_type)
+end
+
+function reaperai_finish_reason_label(reason)
+  reason = tostring(reason or "")
+  if reason == "" then return "" end
+  if reason == "stop" then return "生成完成" end
+  if reason == "length" then return "达到长度上限" end
+  if reason == "tool_calls" then return "等待工具调用" end
+  if reason == "function_call" then return "等待函数调用" end
+  if reason == "content_filter" then return "内容被过滤" end
+  return "结束原因: " .. reason
+end
+
+function reaperai_cancel_generation()
+  local request_text = tostring(state.active_generation_request or state.last_retry_request or state.last_user_request or "")
+  local effective_request = tostring(state.active_generation_effective_request or state.last_retry_effective_request or request_text)
+  local msg = state.active_generation_message_ref
+
+  bump_conversation_epoch()
+  cancel_async_requests()
+
+  if msg and reaperai_message_index_by_ref(msg) then
+    msg.streaming = false
+    msg.reasoning_streaming = false
+    msg.cancelled = true
+    msg.stream_status = "已取消"
+    if tostring(msg.content or "") == "" then
+      msg.content = "已取消生成"
+    end
+    reaperai_mark_retryable_message(msg, request_text, effective_request)
+  else
+    table.insert(state.messages, {
+      role = "assistant",
+      content = "已取消生成",
+      is_system = true
+    })
+  end
+
+  state.waiting = false
+  Waiting.clear(state)
+  if state.pending_operation and state.pending_operation.placeholder then
+    state.pending_operation = nil
+  end
+  if state.audio_waiting then
+    state.audio_pending_count = 0
+    state.audio_waiting = false
+    state.audio_status = "已取消请求"
+  end
+  state.chat_stream_active = false
+  state.stream_typewriter_update = nil
+  state.active_generation_message_ref = nil
+  state.active_generation_request = nil
+  state.active_generation_effective_request = nil
+  state.status = "已取消生成"
+  state.scroll = true
+  return true
+end
+
+function reaperai_retry_message(message_index)
+  if state.waiting or async_pipe_busy() then
+    state.status = "请等待当前请求完成"
+    return false
+  end
+
+  local idx = tonumber(message_index or 0)
+  local msg = idx and idx > 0 and state.messages[idx] or nil
+  local request_text = tostring((msg and msg.request_text) or state.last_retry_request or state.last_user_request or "")
+  local effective_request = tostring((msg and msg.effective_user_request) or state.last_retry_effective_request or request_text)
+
+  if request_text == "" then
+    state.status = "没有可重试的请求"
+    return false
+  end
+
+  if state.pending_operation and not state.pending_operation.needs_clarification then
+    table.insert(state.messages, {
+      role = "assistant",
+      content = "请先确认或取消当前待执行操作，再重试请求。",
+      is_system = true
+    })
+    state.status = "已有待确认操作"
+    state.scroll = true
+    return false
+  end
+
+  if msg and msg.role == "assistant" then
+    table.remove(state.messages, idx)
+  end
+  table.insert(state.messages, { role = "user", content = request_text })
+  state.scroll = true
+  return send_request(request_text, { effective_user_request = effective_request })
+end
+
+function reaperai_begin_llm_stream_display(opts)
+  opts = opts or {}
+  local request_epoch = opts.request_epoch
+  local status_text = tostring(opts.status_text or "正在显示执行计划...")
+  local request_text = tostring(opts.request_text or state.last_user_request or "")
+  local effective_request = tostring(opts.effective_user_request or request_text)
+  local stream = {
+    msg_index = nil,
+    msg_ref = nil,
+    after_finish = opts.after_finish,
+    raw_text = "",
+    visible_text = "",
+    pending_text = "",
+    final_text = nil,
+    done = false,
+    error_seen = false,
+    reasoning_pending_text = "",
+    reasoning_visible_text = "",
+    reasoning_reveal_credit = 0,
+    reasoning_done_requested = false,
+    reveal_credit = 0,
+    last_update = (reaper.time_precise and reaper.time_precise()) or os.clock(),
+  }
+
+  function stream:is_current()
+    return request_epoch == nil or is_current_conversation_epoch(request_epoch)
+  end
+
+  function stream:current_message()
+    if self.msg_ref then
+      for i, msg in ipairs(state.messages) do
+        if msg == self.msg_ref then
+          self.msg_index = i
+          return msg
+        end
+      end
+      return nil
+    end
+    if self.msg_index and state.messages[self.msg_index] then
+      self.msg_ref = state.messages[self.msg_index]
+      return state.messages[self.msg_index]
+    end
+    return nil
+  end
+
+  function stream:message()
+    local existing = self:current_message()
+    if existing then return existing end
+    table.insert(state.messages, {
+      role = "assistant",
+      content = "",
+      streaming = true,
+      stream_status = "正在连接",
+      request_text = request_text,
+      effective_user_request = effective_request,
+    })
+    self.msg_index = #state.messages
+    self.msg_ref = state.messages[self.msg_index]
+    state.active_generation_message_ref = self.msg_ref
+    state.active_generation_request = request_text
+    state.active_generation_effective_request = effective_request
+    state.scroll = true
+    return state.messages[self.msg_index]
+  end
+
+  function stream:stop()
+    local msg = self:current_message()
+    if msg then
+      msg.streaming = false
+    end
+    if state.active_generation_message_ref == self.msg_ref then
+      state.active_generation_message_ref = nil
+      state.active_generation_request = nil
+      state.active_generation_effective_request = nil
+    end
+    if state.stream_typewriter_update == self.update_callback then
+      state.chat_stream_active = false
+      state.stream_typewriter_update = nil
+    end
+  end
+
+  function stream:remove()
+    if self.msg_ref then
+      for i, msg in ipairs(state.messages) do
+        if msg == self.msg_ref then
+          table.remove(state.messages, i)
+          break
+        end
+      end
+    elseif self.msg_index and state.messages[self.msg_index] then
+      table.remove(state.messages, self.msg_index)
+    end
+    self.msg_index = nil
+    self.msg_ref = nil
+    self:stop()
+  end
+
+  function stream:finish_display()
+    local msg = self:message()
+    msg.content = self.final_text or self.visible_text or msg.content or ""
+    msg.streaming = false
+    msg.reasoning_streaming = false
+    if tostring(msg.reasoning_content or "") ~= "" then
+      msg.reasoning_collapsed = true
+    end
+    msg.stream_status = reaperai_finish_reason_label(msg.finish_reason)
+    reaperai_mark_retryable_message(msg, request_text, effective_request)
+    if state.active_generation_message_ref == self.msg_ref then
+      state.active_generation_message_ref = nil
+      state.active_generation_request = nil
+      state.active_generation_effective_request = nil
+    end
+    if state.stream_typewriter_update == self.update_callback then
+      state.chat_stream_active = false
+      state.stream_typewriter_update = nil
+    end
+    local after_finish = self.after_finish
+    self.after_finish = nil
+    if type(after_finish) == "function" then
+      pcall(after_finish, msg, self)
+    end
+    state.scroll = true
+
+    if AsyncPipe and not AsyncPipe.is_busy() then
+      state.waiting = false
+      Waiting.clear(state)
+      if state.pending_operation then
+        state.status = Waiting.operation_status(state.pending_operation, state.status)
+      else
+        state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
+      end
+    end
+  end
+
+  function stream:update()
+    if not self:is_current() then
+      self:stop()
+      return
+    end
+    local active_msg = self:current_message()
+    if not active_msg then return end
+
+    local now = (reaper.time_precise and reaper.time_precise()) or os.clock()
+    local dt = math.max(0, now - (self.last_update or now))
+    self.last_update = now
+
+    local had_reasoning = self.reasoning_pending_text ~= ""
+      or self.reasoning_visible_text ~= ""
+      or tostring(active_msg.reasoning_content or "") ~= ""
+    if self.reasoning_pending_text ~= "" then
+      self.reveal_credit = self.reveal_credit or 0
+      self.reasoning_reveal_credit = math.min(80, (self.reasoning_reveal_credit or 0) + dt * 42)
+      local want_reasoning = math.min(5, math.floor(self.reasoning_reveal_credit))
+      if want_reasoning > 0 then
+        local piece, rest, count = reaperai_stream_take_utf8_chars(self.reasoning_pending_text, want_reasoning)
+        if count > 0 then
+          self.reasoning_pending_text = rest
+          self.reasoning_visible_text = self.reasoning_visible_text .. piece
+          self.reasoning_reveal_credit = self.reasoning_reveal_credit - count
+          local msg = self:current_message() or self:message()
+          msg.reasoning_content = self.reasoning_visible_text
+          msg.reasoning_streaming = true
+          msg.reasoning_collapsed = false
+          msg.stream_status = "正在思考..."
+          state.status = "正在思考..."
+          state.scroll = true
+        end
+      end
+      if had_reasoning then
+        return
+      end
+    elseif self.reasoning_done_requested and had_reasoning then
+      local msg = self:current_message()
+      if msg and tostring(msg.reasoning_content or "") ~= "" then
+        msg.reasoning_streaming = false
+        msg.reasoning_collapsed = true
+      end
+      self.reasoning_done_requested = false
+      return
+    end
+
+    if self.pending_text ~= "" then
+      local backlog = #self.pending_text
+      local cps = 34
+      local max_per_frame = 4
+      if backlog > 1200 then
+        cps = 180
+        max_per_frame = 18
+      elseif backlog > 500 then
+        cps = 120
+        max_per_frame = 12
+      elseif backlog > 180 then
+        cps = 72
+        max_per_frame = 8
+      end
+
+      self.reveal_credit = math.min(80, (self.reveal_credit or 0) + dt * cps)
+      local want = math.min(max_per_frame, math.floor(self.reveal_credit))
+      if want > 0 then
+        local piece, rest, count = reaperai_stream_take_utf8_chars(self.pending_text, want)
+        if count > 0 then
+          self.pending_text = rest
+          self.visible_text = self.visible_text .. piece
+          self.reveal_credit = self.reveal_credit - count
+          local msg = self:current_message() or self:message()
+          msg.content = self.visible_text
+          msg.streaming = true
+          msg.stream_status = status_text
+          state.status = status_text
+          state.scroll = true
+        end
+      end
+    end
+
+    if self.done and self.pending_text == "" and self.reasoning_pending_text == "" then
+      self:finish_display()
+    end
+  end
+
+  function stream:set_final(text)
+    self.final_text = strip_intent_block_for_display(text)
+    self.done = true
+    if self.final_text:sub(1, #self.visible_text) == self.visible_text then
+      self.pending_text = self.final_text:sub(#self.visible_text + 1)
+    else
+      self.visible_text = ""
+      self.pending_text = self.final_text
+      local msg = self:current_message()
+      if msg then
+        msg.content = ""
+      end
+    end
+    self:update()
+  end
+
+  function stream:fail(message)
+    self.error_seen = true
+    self.pending_text = ""
+    self.done = true
+    self.final_text = nil
+    local msg = self:message()
+    msg.streaming = false
+    msg.reasoning_streaming = false
+    if tostring(msg.content or "") == "" then
+      msg.content = "⚠️ " .. tostring(message or "请求失败")
+    else
+      msg.content = tostring(msg.content) .. "\n\n⚠️ " .. tostring(message or "请求失败")
+    end
+    msg.stream_status = "请求失败"
+    reaperai_mark_retryable_message(msg, request_text, effective_request)
+    self:stop()
+    state.scroll = true
+  end
+
+  function stream:on_event(event)
+    if not self:is_current() then return end
+    event = event or {}
+    local event_type = tostring(event.type or "")
+    if event_type == "start" then
+      local msg = self:message()
+      msg.stream_status = "已连接"
+    elseif event_type == "delta" then
+      local delta = tostring(event.content or "")
+      if delta ~= "" then
+        self.reasoning_done_requested = true
+        self.raw_text = self.raw_text .. delta
+        self.pending_text = self.pending_text .. delta
+        self:update()
+      end
+    elseif event_type == "reasoning_delta" then
+      local delta = tostring(event.content or "")
+      if delta ~= "" then
+        local msg = self:message()
+        self.reasoning_pending_text = self.reasoning_pending_text .. delta
+        msg.reasoning_streaming = true
+        msg.reasoning_collapsed = false
+        msg.stream_status = "正在思考..."
+        state.status = "正在思考..."
+        self:update()
+        state.scroll = true
+      end
+    elseif event_type == "tool_call" then
+      local msg = self:message()
+      reaperai_apply_tool_call_event(msg, event)
+      state.status = msg.advanced_status or "正在处理工具调用..."
+      state.scroll = true
+    elseif event_type == "finish" then
+      local msg = self:message()
+      msg.finish_reason = tostring(event.finish_reason or "")
+      msg.stream_status = reaperai_finish_reason_label(msg.finish_reason)
+      self.reasoning_done_requested = true
+      self:update()
+      state.scroll = true
+    elseif event_type == "done" then
+      self.reasoning_done_requested = true
+      self.raw_text = tostring(event.content or self.raw_text or "")
+      self:set_final(self.raw_text)
+    elseif event_type == "error" then
+      self:fail(event.message or "请求失败")
+    end
+  end
+
+  stream.update_callback = function()
+    stream:update()
+  end
+
+  state.chat_stream_active = true
+  state.stream_typewriter_update = stream.update_callback
+  stream:message()
+  return stream
 end
 
 local function append_stable_script_prompt(sys)
@@ -1445,6 +1938,10 @@ send_request = function(user_msg, request_opts)
 
   local effective_user_request = tostring(request_opts.effective_user_request or user_msg or "")
   state.last_user_request = effective_user_request
+  state.last_retry_request = tostring(user_msg or "")
+  state.last_retry_effective_request = effective_user_request
+  state.active_generation_request = tostring(user_msg or "")
+  state.active_generation_effective_request = effective_user_request
 
   -- v1.0+：始终使用异步方式
   if AsyncPipe then
@@ -1501,6 +1998,271 @@ send_request = function(user_msg, request_opts)
     
     -- 启动异步请求（v1.0 支持多个并发）
     local request_epoch = current_conversation_epoch()
+    local stream_enabled = request_opts.stream ~= false
+    local stream_msg_index = nil
+    local stream_text = ""
+    local stream_visible_text = ""
+    local stream_pending_text = ""
+    local stream_final_text = nil
+    local stream_done = false
+    local stream_reveal_credit = 0
+    local stream_last_update = (reaper.time_precise and reaper.time_precise()) or os.clock()
+    local stream_error_seen = false
+    local stream_reasoning = { pending = "", visible = "", credit = 0, done_requested = false }
+    local stream_after_finish = nil
+
+    local function take_utf8_chars(text, max_chars)
+      text = tostring(text or "")
+      max_chars = math.max(0, math.floor(tonumber(max_chars or 0) or 0))
+      if max_chars <= 0 or text == "" then return "", text, 0 end
+
+      local i = 1
+      local taken = 0
+      local len = #text
+      while i <= len and taken < max_chars do
+        local b = text:byte(i) or 0
+        local step = 1
+        if b >= 0xF0 then
+          step = 4
+        elseif b >= 0xE0 then
+          step = 3
+        elseif b >= 0xC0 then
+          step = 2
+        end
+        if i + step - 1 > len then break end
+        i = i + step
+        taken = taken + 1
+      end
+
+      if taken <= 0 then return "", text, 0 end
+      return text:sub(1, i - 1), text:sub(i), taken
+    end
+
+    local function finish_stream_display()
+      if not stream_msg_index or not state.messages[stream_msg_index] then return end
+      local msg = state.messages[stream_msg_index]
+      msg.content = stream_final_text or stream_visible_text or msg.content or ""
+      msg.streaming = false
+      msg.reasoning_streaming = false
+      if tostring(msg.reasoning_content or "") ~= "" then
+        msg.reasoning_collapsed = true
+      end
+      msg.stream_status = reaperai_finish_reason_label(msg.finish_reason)
+      reaperai_mark_retryable_message(msg, user_msg, effective_user_request)
+      state.chat_stream_active = false
+      state.stream_typewriter_update = nil
+      if state.active_generation_message_ref == msg then
+        state.active_generation_message_ref = nil
+        state.active_generation_request = nil
+        state.active_generation_effective_request = nil
+      end
+      local after_finish = stream_after_finish
+      stream_after_finish = nil
+      if type(after_finish) == "function" then
+        pcall(after_finish, msg)
+      end
+      state.scroll = true
+
+      if AsyncPipe and not AsyncPipe.is_busy() then
+        state.waiting = false
+        Waiting.clear(state)
+        if state.pending_operation then
+          state.status = Waiting.operation_status(state.pending_operation, state.status)
+        else
+          state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
+        end
+      end
+    end
+
+    local function update_stream_typewriter()
+      if not stream_enabled then return end
+      if not stream_msg_index or not state.messages[stream_msg_index] then return end
+
+      local now = (reaper.time_precise and reaper.time_precise()) or os.clock()
+      local dt = math.max(0, now - (stream_last_update or now))
+      stream_last_update = now
+
+      local active_msg = state.messages[stream_msg_index]
+      local had_reasoning = stream_reasoning.pending ~= ""
+        or stream_reasoning.visible ~= ""
+        or tostring(active_msg.reasoning_content or "") ~= ""
+      if stream_reasoning.pending ~= "" then
+        stream_reasoning.credit = math.min(80, (stream_reasoning.credit or 0) + dt * 42)
+        local want_reasoning = math.min(5, math.floor(stream_reasoning.credit))
+        if want_reasoning > 0 then
+          local piece, rest, count = take_utf8_chars(stream_reasoning.pending, want_reasoning)
+          if count > 0 then
+            stream_reasoning.pending = rest
+            stream_reasoning.visible = stream_reasoning.visible .. piece
+            stream_reasoning.credit = stream_reasoning.credit - count
+            local msg = state.messages[stream_msg_index]
+            msg.reasoning_content = stream_reasoning.visible
+            msg.reasoning_streaming = true
+            msg.reasoning_collapsed = false
+            msg.stream_status = "正在思考..."
+            state.status = "正在思考..."
+            state.scroll = true
+          end
+        end
+        if had_reasoning then
+          return
+        end
+      elseif stream_reasoning.done_requested and had_reasoning then
+        local msg = state.messages[stream_msg_index]
+        if msg and tostring(msg.reasoning_content or "") ~= "" then
+          msg.reasoning_streaming = false
+          msg.reasoning_collapsed = true
+        end
+        stream_reasoning.done_requested = false
+        return
+      end
+
+      if stream_pending_text ~= "" then
+        local backlog = #stream_pending_text
+        local cps = 34
+        local max_per_frame = 4
+        if backlog > 1200 then
+          cps = 180
+          max_per_frame = 18
+        elseif backlog > 500 then
+          cps = 120
+          max_per_frame = 12
+        elseif backlog > 180 then
+          cps = 72
+          max_per_frame = 8
+        end
+
+        stream_reveal_credit = math.min(80, (stream_reveal_credit or 0) + dt * cps)
+        local want = math.min(max_per_frame, math.floor(stream_reveal_credit))
+        if want > 0 then
+          local piece, rest, count = take_utf8_chars(stream_pending_text, want)
+          if count > 0 then
+            stream_pending_text = rest
+            stream_visible_text = stream_visible_text .. piece
+            stream_reveal_credit = stream_reveal_credit - count
+            state.messages[stream_msg_index].content = stream_visible_text
+            state.messages[stream_msg_index].streaming = true
+            state.messages[stream_msg_index].stream_status = (state.exec_mode or state.mcp_running) and "正在显示执行计划..." or "正在显示回复..."
+            state.status = (state.exec_mode or state.mcp_running) and "正在显示执行计划..." or "正在显示回复..."
+            state.scroll = true
+          end
+        end
+      end
+
+      if stream_done and stream_pending_text == "" and stream_reasoning.pending == "" then
+        finish_stream_display()
+      end
+    end
+
+    local function ensure_stream_message()
+      if stream_msg_index and state.messages[stream_msg_index] then
+        return state.messages[stream_msg_index]
+      end
+
+      table.insert(state.messages, {
+        role = "assistant",
+        content = "",
+        streaming = true,
+        stream_status = "正在连接",
+        request_text = tostring(user_msg or ""),
+        effective_user_request = effective_user_request,
+      })
+      stream_msg_index = #state.messages
+      state.active_generation_message_ref = state.messages[stream_msg_index]
+      state.scroll = true
+      return state.messages[stream_msg_index]
+    end
+
+    local function set_stream_message(content, streaming)
+      local msg = ensure_stream_message()
+      msg.content = tostring(content or "")
+      msg.streaming = streaming == true
+      state.scroll = true
+      return msg
+    end
+
+    local function handle_stream_event(event)
+      if not is_current_conversation_epoch(request_epoch) then return end
+      event = event or {}
+      local event_type = tostring(event.type or "")
+
+      if event_type == "start" then
+        local msg = ensure_stream_message()
+        msg.stream_status = "已连接"
+      elseif event_type == "delta" then
+        local delta = tostring(event.content or "")
+        if delta ~= "" then
+          stream_reasoning.done_requested = true
+          stream_text = stream_text .. delta
+          stream_pending_text = stream_pending_text .. delta
+          update_stream_typewriter()
+        end
+      elseif event_type == "reasoning_delta" then
+        local delta = tostring(event.content or "")
+        if delta ~= "" then
+          local msg = ensure_stream_message()
+          stream_reasoning.pending = stream_reasoning.pending .. delta
+          msg.reasoning_streaming = true
+          msg.reasoning_collapsed = false
+          msg.stream_status = "正在思考..."
+          state.status = "正在思考..."
+          update_stream_typewriter()
+          state.scroll = true
+        end
+      elseif event_type == "tool_call" then
+        local msg = ensure_stream_message()
+        reaperai_apply_tool_call_event(msg, event)
+        state.status = msg.advanced_status or "正在处理工具调用..."
+        state.scroll = true
+      elseif event_type == "finish" then
+        local msg = ensure_stream_message()
+        msg.finish_reason = tostring(event.finish_reason or "")
+        msg.stream_status = reaperai_finish_reason_label(msg.finish_reason)
+        stream_reasoning.done_requested = true
+        update_stream_typewriter()
+        state.scroll = true
+      elseif event_type == "done" then
+        stream_reasoning.done_requested = true
+        stream_text = tostring(event.content or stream_text or "")
+        stream_final_text = strip_intent_block_for_display(stream_text)
+        stream_done = true
+        if stream_final_text:sub(1, #stream_visible_text) == stream_visible_text then
+          stream_pending_text = stream_final_text:sub(#stream_visible_text + 1)
+        else
+          stream_visible_text = ""
+          stream_pending_text = stream_final_text
+          if stream_msg_index and state.messages[stream_msg_index] then
+            state.messages[stream_msg_index].content = ""
+          end
+        end
+        update_stream_typewriter()
+      elseif event_type == "error" then
+        local message = tostring(event.message or "请求失败")
+        stream_error_seen = true
+        stream_pending_text = ""
+        stream_done = true
+        stream_final_text = nil
+        local msg = ensure_stream_message()
+        msg.streaming = false
+        msg.reasoning_streaming = false
+        if tostring(msg.content or "") == "" then
+          msg.content = "⚠️ 请求失败: " .. message
+        else
+          msg.content = tostring(msg.content) .. "\n\n⚠️ 请求失败: " .. message
+        end
+        msg.stream_status = "请求失败"
+        reaperai_mark_retryable_message(msg, user_msg, effective_user_request)
+        state.chat_stream_active = false
+        state.stream_typewriter_update = nil
+        if state.active_generation_message_ref == msg then
+          state.active_generation_message_ref = nil
+          state.active_generation_request = nil
+          state.active_generation_effective_request = nil
+        end
+        state.scroll = true
+      end
+    end
+
     local req_id, err = AsyncPipe.send_request(
       CONFIG.llm_url,
       CONFIG.llm_key,
@@ -1511,37 +2273,121 @@ send_request = function(user_msg, request_opts)
         -- 回调函数：响应完成时直接处理
         if error then
           Waiting.clear_operation_placeholder(state)
-          table.insert(state.messages, {
-            role = "assistant",
-            content = "⚠️ 请求失败: " .. error
-          })
+          if stream_enabled and stream_msg_index and state.messages[stream_msg_index] then
+            local msg = state.messages[stream_msg_index]
+            msg.streaming = false
+            msg.reasoning_streaming = false
+            if (not stream_error_seen) and tostring(error or "") ~= "请求已取消" then
+              if tostring(msg.content or "") == "" then
+                msg.content = "⚠️ 请求失败: " .. tostring(error)
+              else
+                msg.content = tostring(msg.content) .. "\n\n⚠️ 请求失败: " .. tostring(error)
+              end
+            end
+            msg.stream_status = tostring(error or "") == "请求已取消" and "已取消" or "请求失败"
+            reaperai_mark_retryable_message(msg, user_msg, effective_user_request)
+            state.chat_stream_active = false
+            state.stream_typewriter_update = nil
+            if state.active_generation_message_ref == msg then
+              state.active_generation_message_ref = nil
+              state.active_generation_request = nil
+              state.active_generation_effective_request = nil
+            end
+          else
+            local msg = {
+              role = "assistant",
+              content = "⚠️ 请求失败: " .. error,
+              stream_status = "请求失败"
+            }
+            reaperai_mark_retryable_message(msg, user_msg, effective_user_request)
+            table.insert(state.messages, msg)
+          end
         else
           local r, parse_err = parse_response_content(response)
           if r then
             -- 执行模式下，先生成待确认 Operation，不再自动执行
             if state.exec_mode then
-              table.insert(state.messages, {role = "assistant", content = strip_intent_block_for_display(r)})
-              local ai_msg_index = #state.messages
-              local queued = queue_operation_for_confirmation(r, effective_user_request)
-              if queued == "repairing" then
-                table.remove(state.messages, ai_msg_index)
-              elseif not queued then
-                Waiting.clear_operation_placeholder(state)
+              local display_text = strip_intent_block_for_display(r)
+              local ai_msg_index = nil
+              if stream_enabled and stream_msg_index and state.messages[stream_msg_index] then
+                stream_final_text = display_text
+                stream_done = true
+                ai_msg_index = stream_msg_index
+                stream_after_finish = function(msg)
+                  local queued = queue_operation_for_confirmation(r, effective_user_request)
+                  if queued == "repairing" then
+                    local idx = reaperai_message_index_by_ref(msg)
+                    if idx then
+                      table.remove(state.messages, idx)
+                    elseif ai_msg_index and state.messages[ai_msg_index] then
+                      table.remove(state.messages, ai_msg_index)
+                    end
+                  elseif not queued then
+                    Waiting.clear_operation_placeholder(state)
+                  end
+                end
+                update_stream_typewriter()
+              else
+                local msg = {role = "assistant", content = display_text}
+                reaperai_mark_retryable_message(msg, user_msg, effective_user_request)
+                table.insert(state.messages, msg)
+                ai_msg_index = #state.messages
+                local queued = queue_operation_for_confirmation(r, effective_user_request)
+                if queued == "repairing" then
+                  if ai_msg_index and state.messages[ai_msg_index] then
+                    table.remove(state.messages, ai_msg_index)
+                  end
+                  if state.stream_typewriter_update == update_stream_typewriter then
+                    state.chat_stream_active = false
+                    state.stream_typewriter_update = nil
+                  end
+                elseif not queued then
+                  Waiting.clear_operation_placeholder(state)
+                end
               end
             else
-              table.insert(state.messages, {role = "assistant", content = strip_intent_block_for_display(r)})
+              local display_text = strip_intent_block_for_display(r)
+              if stream_enabled and stream_msg_index and state.messages[stream_msg_index] then
+                stream_final_text = display_text
+                stream_done = true
+                update_stream_typewriter()
+              else
+                local msg = {role = "assistant", content = display_text}
+                reaperai_mark_retryable_message(msg, user_msg, effective_user_request)
+                table.insert(state.messages, msg)
+              end
             end
           else
             Waiting.clear_operation_placeholder(state)
-            table.insert(state.messages, {
-              role = "assistant",
-              content = "⚠️ 解析响应失败: " .. tostring(parse_err or "未知错误")
-            })
+            if stream_enabled and stream_msg_index and state.messages[stream_msg_index] then
+              local msg = state.messages[stream_msg_index]
+              msg.streaming = false
+              msg.reasoning_streaming = false
+              if msg.tool_calls and #msg.tool_calls > 0 then
+                msg.content = "⚠️ 模型请求了工具调用，当前版本已记录调用信息，但未自动执行 OpenAI tool call。"
+                msg.stream_status = "等待工具调用"
+              else
+                msg.content = "⚠️ 解析响应失败: " .. tostring(parse_err or "未知错误")
+                msg.stream_status = "解析失败"
+              end
+              reaperai_mark_retryable_message(msg, user_msg, effective_user_request)
+            else
+              local msg = {
+                role = "assistant",
+                content = "⚠️ 解析响应失败: " .. tostring(parse_err or "未知错误"),
+                stream_status = "解析失败"
+              }
+              reaperai_mark_retryable_message(msg, user_msg, effective_user_request)
+              table.insert(state.messages, msg)
+            end
           end
         end
         state.scroll = true
         -- 检查是否还有正在进行的请求
         if AsyncPipe and not AsyncPipe.is_busy() then
+          if stream_enabled and state.chat_stream_active then
+            return
+          end
           state.waiting = false
           Waiting.clear(state)
           if state.pending_operation then
@@ -1550,15 +2396,25 @@ send_request = function(user_msg, request_opts)
             state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
           end
         end
-      end
+      end,
+      stream_enabled and "llm_stream" or nil,
+      stream_enabled and handle_stream_event or nil
     )
     
     if not req_id then
       state.status = "启动异步请求失败: " .. tostring(err)
+      state.active_generation_message_ref = nil
+      state.active_generation_request = nil
+      state.active_generation_effective_request = nil
       return false
     end
     
     state.waiting = true
+    if stream_enabled then
+      state.chat_stream_active = true
+      state.stream_typewriter_update = update_stream_typewriter
+      ensure_stream_message()
+    end
     if state.exec_mode then
       Waiting.start(state, "exec_plan", effective_user_request)
       Waiting.show_operation_placeholder(state, effective_user_request)
@@ -1585,10 +2441,18 @@ end
 -- 检查 LLM 响应 (v1.0+ 异步响应直接在回调中处理)
 -- ============================================
 local function check_resp()
+  if state.stream_typewriter_update then
+    pcall(state.stream_typewriter_update)
+  end
+
   -- v1.0+：异步响应直接在回调中处理，这里只更新状态
   if AsyncPipe and AsyncPipe.is_busy() then
     Waiting.update(state)
     return nil  -- 继续等待
+  end
+
+  if state.waiting and state.chat_stream_active then
+    return nil
   end
   
   -- 如果没有正在进行的异步请求，检查是否所有请求已完成
@@ -2239,6 +3103,12 @@ submit_script_preflight_repair_request = function(user_msg, bad_text, op, attemp
 
   local messages = build_script_preflight_repair_messages(user_msg, bad_text, op, attempt)
   local request_epoch = current_conversation_epoch()
+  local stream = reaperai_begin_llm_stream_display({
+    request_epoch = request_epoch,
+    request_text = user_msg,
+    effective_user_request = user_msg,
+    status_text = "正在显示脚本修复计划..."
+  })
   local req_id, err = AsyncPipe.send_request(
     CONFIG.llm_url,
     CONFIG.llm_key,
@@ -2247,29 +3117,26 @@ submit_script_preflight_repair_request = function(user_msg, bad_text, op, attemp
     function(response, error)
       if not is_current_conversation_epoch(request_epoch) then return end
       if error then
-        table.insert(state.messages, {
-          role = "assistant",
-          content = "⚠️ SCRIPT 自动修复请求失败: " .. tostring(error),
-          is_system = true
-        })
+        stream:fail("SCRIPT 自动修复请求失败: " .. tostring(error))
         show_operation_card(op, false)
       else
         local r, parse_err = parse_response_content(response)
         if r then
-          table.insert(state.messages, {role = "assistant", content = strip_intent_block_for_display(r)})
-          queue_operation_for_confirmation(r, user_msg, attempt)
+          stream.after_finish = function()
+            queue_operation_for_confirmation(r, user_msg, attempt)
+          end
+          stream:set_final(r)
         else
-          table.insert(state.messages, {
-            role = "assistant",
-            content = "⚠️ SCRIPT 自动修复响应解析失败: " .. tostring(parse_err or "未知错误"),
-            is_system = true
-          })
+          stream:fail("SCRIPT 自动修复响应解析失败: " .. tostring(parse_err or "未知错误"))
           show_operation_card(op, false)
         end
       end
 
       state.scroll = true
       if AsyncPipe and not AsyncPipe.is_busy() then
+        if state.chat_stream_active then
+          return
+        end
         state.waiting = false
         Waiting.clear(state)
         if state.pending_operation then
@@ -2278,10 +3145,15 @@ submit_script_preflight_repair_request = function(user_msg, bad_text, op, attemp
           state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
         end
       end
+    end,
+    "llm_stream",
+    function(event)
+      stream:on_event(event)
     end
   )
 
   if not req_id then
+    stream:remove()
     table.insert(state.messages, {
       role = "assistant",
       content = "⚠️ SCRIPT 自动修复启动失败: " .. tostring(err),
@@ -2313,6 +3185,12 @@ submit_operation_repair_request = function(user_msg, bad_text, op, attempt)
 
   local messages = build_operation_repair_messages(user_msg, bad_text, op, attempt)
   local request_epoch = current_conversation_epoch()
+  local stream = reaperai_begin_llm_stream_display({
+    request_epoch = request_epoch,
+    request_text = user_msg,
+    effective_user_request = user_msg,
+    status_text = "正在显示修复计划..."
+  })
   local req_id, err = AsyncPipe.send_request(
     CONFIG.llm_url,
     CONFIG.llm_key,
@@ -2321,29 +3199,26 @@ submit_operation_repair_request = function(user_msg, bad_text, op, attempt)
     function(response, error)
       if not is_current_conversation_epoch(request_epoch) then return end
       if error then
-        table.insert(state.messages, {
-          role = "assistant",
-          content = "⚠️ 自动修复请求失败: " .. tostring(error),
-          is_system = true
-        })
+        stream:fail("自动修复请求失败: " .. tostring(error))
         show_operation_card(op, false)
       else
         local r, parse_err = parse_response_content(response)
         if r then
-          table.insert(state.messages, {role = "assistant", content = strip_intent_block_for_display(r)})
-          queue_operation_for_confirmation(r, user_msg, attempt)
+          stream.after_finish = function()
+            queue_operation_for_confirmation(r, user_msg, attempt)
+          end
+          stream:set_final(r)
         else
-          table.insert(state.messages, {
-            role = "assistant",
-            content = "⚠️ 自动修复响应解析失败: " .. tostring(parse_err or "未知错误"),
-            is_system = true
-          })
+          stream:fail("自动修复响应解析失败: " .. tostring(parse_err or "未知错误"))
           show_operation_card(op, false)
         end
       end
 
       state.scroll = true
       if AsyncPipe and not AsyncPipe.is_busy() then
+        if state.chat_stream_active then
+          return
+        end
         state.waiting = false
         Waiting.clear(state)
         if state.pending_operation then
@@ -2352,10 +3227,15 @@ submit_operation_repair_request = function(user_msg, bad_text, op, attempt)
           state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
         end
       end
+    end,
+    "llm_stream",
+    function(event)
+      stream:on_event(event)
     end
   )
 
   if not req_id then
+    stream:remove()
     table.insert(state.messages, {
       role = "assistant",
       content = "⚠️ 自动修复启动失败: " .. tostring(err),
@@ -2392,6 +3272,12 @@ local function submit_runtime_repair_request(op, results)
 
   local messages = build_runtime_repair_messages(op, results, attempt)
   local request_epoch = current_conversation_epoch()
+  local stream = reaperai_begin_llm_stream_display({
+    request_epoch = request_epoch,
+    request_text = op.user_request or state.last_user_request or "",
+    effective_user_request = op.user_request or state.last_user_request or "",
+    status_text = "正在显示运行修复计划..."
+  })
   local req_id, err = AsyncPipe.send_request(
     CONFIG.llm_url,
     CONFIG.llm_key,
@@ -2400,15 +3286,10 @@ local function submit_runtime_repair_request(op, results)
     function(response, error)
       if not is_current_conversation_epoch(request_epoch) then return end
       if error then
-        table.insert(state.messages, {
-          role = "assistant",
-          content = "⚠️ 运行修复请求失败: " .. tostring(error),
-          is_system = true
-        })
+        stream:fail("运行修复请求失败: " .. tostring(error))
       else
         local r, parse_err = parse_response_content(response)
         if r then
-          table.insert(state.messages, {role = "assistant", content = strip_intent_block_for_display(r)})
           local repair_user_request = op.user_request or state.last_user_request or ""
           local repair_op = create_operation_from_response(r, repair_user_request)
           if repair_op then
@@ -2420,8 +3301,12 @@ local function submit_runtime_repair_request(op, results)
             repair_op.repair_prefers_generated_references = user_request_mentions_generated_reference(repair_user_request)
             materialize_repair_generated_references(repair_op, op)
             apply_runtime_repair_replay_guard(repair_op, op)
-            show_operation_card(repair_op, true)
+            stream.after_finish = function()
+              show_operation_card(repair_op, true)
+            end
+            stream:set_final(r)
           else
+            stream:set_final(r)
             table.insert(state.messages, {
               role = "assistant",
               content = "⚠️ 运行修复响应没有生成可确认操作卡。",
@@ -2429,16 +3314,15 @@ local function submit_runtime_repair_request(op, results)
             })
           end
         else
-          table.insert(state.messages, {
-            role = "assistant",
-            content = "⚠️ 运行修复响应解析失败: " .. tostring(parse_err or "未知错误"),
-            is_system = true
-          })
+          stream:fail("运行修复响应解析失败: " .. tostring(parse_err or "未知错误"))
         end
       end
 
       state.scroll = true
       if AsyncPipe and not AsyncPipe.is_busy() then
+        if state.chat_stream_active then
+          return
+        end
         state.waiting = false
         Waiting.clear(state)
         if state.pending_operation then
@@ -2447,10 +3331,15 @@ local function submit_runtime_repair_request(op, results)
           state.status = "操作失败"
         end
       end
+    end,
+    "llm_stream",
+    function(event)
+      stream:on_event(event)
     end
   )
 
   if not req_id then
+    stream:remove()
     table.insert(state.messages, {
       role = "assistant",
       content = "⚠️ 运行修复启动失败: " .. tostring(err),
@@ -4265,6 +5154,8 @@ local function make_ui_context()
       execute_pending_operation = execute_pending_operation,
       cancel_pending_operation = cancel_pending_operation,
       submit_clarification_answer = submit_pending_clarification_answer,
+      cancel_generation = reaperai_cancel_generation,
+      retry_message = reaperai_retry_message,
       send_elevenlabs_request = send_elevenlabs_request,
       send_request = send_request,
       operation_risk_label = operation_risk_label,
@@ -4277,11 +5168,11 @@ render_operation_cards = function()
   return UI.render_operation_cards(make_ui_context())
 end
 
-local function render()
+function reaperai_render()
   return UI.render(make_ui_context())
 end
 
-local function cleanup_on_window_close()
+function reaperai_cleanup_on_window_close()
   reset_conversation_state("window_close", { status = "窗口关闭中..." })
   release_reaperai_instance()
 
@@ -4300,7 +5191,7 @@ end
 -- ============================================
 -- 主循环 (v1.0 异步响应直接在回调中处理)
 -- ============================================
-local function main()
+function reaperai_main()
   if not is_current_reaperai_instance() then
     stop_stale_reaperai_instance()
     return
@@ -4335,11 +5226,11 @@ local function main()
 
   process_mcp_background_tasks()
 
-  local cont = render()
+  local cont = reaperai_render()
   if cont then
-    reaper.defer(main)
+    reaper.defer(reaperai_main)
   else
-    cleanup_on_window_close()
+    reaperai_cleanup_on_window_close()
     state.ctx = nil
   end
 end
@@ -4356,5 +5247,5 @@ if CONFIG.llm_key == "" or CONFIG.llm_key == "在此填入你的 API Key" then
   state.status = "请先在设置面板填写 LLM API Key"
 end
 
-main()
+reaperai_main()
 

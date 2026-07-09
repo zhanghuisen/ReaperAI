@@ -254,12 +254,13 @@ def llm_payload_fallbacks(payload, error_text):
     return candidates
 
 
-def post_llm_payload(api_url, headers, payload):
+def post_llm_payload(api_url, headers, payload, stream=False):
     return requests.post(
         api_url,
         headers=headers,
         json=payload,
-        timeout=RESPONSE_TIMEOUT
+        timeout=RESPONSE_TIMEOUT,
+        stream=stream,
     )
 
 
@@ -303,6 +304,263 @@ def make_api_request(api_url, api_key, model, messages):
         return {"success": False, "error": f"网络错误: {str(e)}"}
     except Exception as e:
         return {"success": False, "error": f"未知错误: {str(e)}"}
+
+
+def write_signal_file(signal_file):
+    with open(signal_file, 'w') as f:
+        f.write("done")
+
+
+def write_stream_event(resp_file, event):
+    os.makedirs(os.path.dirname(resp_file) or ".", exist_ok=True)
+    with open(resp_file, 'a', encoding='utf-8', newline='\n') as f:
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        f.flush()
+
+
+def finish_stream(resp_file, signal_file, content):
+    write_stream_event(resp_file, {"type": "done", "content": content or ""})
+    write_signal_file(signal_file)
+    return {"success": True, "content": content or ""}
+
+
+def fail_stream(resp_file, signal_file, error):
+    message = str(error or "未知错误")
+    write_stream_event(resp_file, {"type": "error", "message": message})
+    write_signal_file(signal_file)
+    return {"success": False, "error": message}
+
+
+def stream_content_delta(data):
+    if not isinstance(data, dict):
+        return ""
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return ""
+
+    parts = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            content = delta.get("content")
+            if content:
+                parts.append(str(content))
+            continue
+
+        message = choice.get("message")
+        if isinstance(message, dict) and message.get("content"):
+            parts.append(str(message.get("content")))
+
+    return "".join(parts)
+
+
+def stream_reasoning_delta(data):
+    if not isinstance(data, dict):
+        return ""
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return ""
+
+    parts = []
+    reasoning_keys = ("reasoning_content", "reasoning", "thinking", "thinking_content")
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        for holder_key in ("delta", "message"):
+            holder = choice.get(holder_key)
+            if not isinstance(holder, dict):
+                continue
+            for key in reasoning_keys:
+                value = holder.get(key)
+                if isinstance(value, str) and value:
+                    parts.append(value)
+            content = holder.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = str(item.get("type") or "").lower()
+                    if item_type in ("reasoning", "reasoning_text", "thinking", "thinking_text"):
+                        text = item.get("text") or item.get("content") or item.get("reasoning")
+                        if isinstance(text, str) and text:
+                            parts.append(text)
+
+    return "".join(parts)
+
+
+def stream_tool_call_events(data):
+    if not isinstance(data, dict):
+        return []
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return []
+
+    events = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        for holder_key in ("delta", "message"):
+            holder = choice.get(holder_key)
+            if not isinstance(holder, dict):
+                continue
+
+            calls = holder.get("tool_calls")
+            if isinstance(calls, list):
+                for call in calls:
+                    if not isinstance(call, dict):
+                        continue
+                    fn = call.get("function")
+                    if not isinstance(fn, dict):
+                        fn = {}
+                    name = fn.get("name") or call.get("name") or ""
+                    arguments = fn.get("arguments") or call.get("arguments") or ""
+                    call_id = call.get("id") or ""
+                    call_type = call.get("type") or "tool"
+                    index = call.get("index")
+                    if name or arguments or call_id:
+                        events.append({
+                            "type": "tool_call",
+                            "index": "" if index is None else str(index),
+                            "id": str(call_id or ""),
+                            "call_type": str(call_type or "tool"),
+                            "name": str(name or ""),
+                            "arguments": str(arguments or ""),
+                        })
+
+            function_call = holder.get("function_call")
+            if isinstance(function_call, dict):
+                name = function_call.get("name") or ""
+                arguments = function_call.get("arguments") or ""
+                if name or arguments:
+                    events.append({
+                        "type": "tool_call",
+                        "index": "function_call",
+                        "id": "",
+                        "call_type": "function",
+                        "name": str(name or ""),
+                        "arguments": str(arguments or ""),
+                    })
+
+    return events
+
+
+def stream_finish_reasons(data):
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list):
+        return []
+    reasons = []
+    for choice in choices:
+        if isinstance(choice, dict) and choice.get("finish_reason"):
+            reasons.append(str(choice.get("finish_reason")))
+    return reasons
+
+
+def stream_has_length_finish(data):
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(choices, list):
+        return False
+    return any(isinstance(choice, dict) and choice.get("finish_reason") == "length" for choice in choices)
+
+
+def make_api_stream_request(api_url, api_key, model, messages, resp_file, signal_file):
+    """调用 OpenAI-compatible Chat Completions streaming API and write JSONL events."""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+
+    try:
+        payload = build_llm_payload(api_url, model, messages)
+        payload["stream"] = True
+        response = post_llm_payload(api_url, headers, payload, stream=True)
+
+        if response.status_code != 200:
+            error_detail = response.text[:500] if len(response.text) > 500 else response.text
+            for fallback_payload in llm_payload_fallbacks(payload, error_detail):
+                fallback_payload = dict(fallback_payload)
+                fallback_payload["stream"] = True
+                fallback_response = post_llm_payload(api_url, headers, fallback_payload, stream=True)
+                if fallback_response.status_code == 200:
+                    response = fallback_response
+                    break
+                error_detail = fallback_response.text[:500] if len(fallback_response.text) > 500 else fallback_response.text
+            else:
+                # If a provider rejects stream outright, degrade gracefully to one-shot output.
+                if "stream" in (error_detail or "").lower():
+                    fallback = make_api_request(api_url, api_key, model, messages)
+                    if fallback.get("success"):
+                        content = fallback.get("content", "")
+                        write_stream_event(resp_file, {"type": "start"})
+                        if content:
+                            write_stream_event(resp_file, {"type": "delta", "content": content})
+                        return finish_stream(resp_file, signal_file, content)
+                    return fail_stream(resp_file, signal_file, fallback.get("error"))
+                return fail_stream(resp_file, signal_file, f"API 错误 {response.status_code}: {error_detail}")
+
+        write_stream_event(resp_file, {"type": "start"})
+        content_parts = []
+        truncated = False
+
+        for raw_line in response.iter_lines(decode_unicode=False):
+            if isinstance(raw_line, bytes):
+                raw_line = raw_line.decode("utf-8", errors="replace")
+            if not raw_line:
+                continue
+            line = raw_line.strip()
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line:
+                continue
+            if line == "[DONE]":
+                break
+
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                log(f"跳过无法解析的 streaming 行: {line[:200]}")
+                continue
+
+            if isinstance(data, dict) and data.get("error"):
+                err = data["error"]
+                if isinstance(err, dict):
+                    err = err.get("message") or err.get("error") or str(err)
+                return fail_stream(resp_file, signal_file, f"API错误: {err}")
+
+            reasoning_delta = stream_reasoning_delta(data)
+            if reasoning_delta:
+                write_stream_event(resp_file, {"type": "reasoning_delta", "content": reasoning_delta})
+
+            for tool_event in stream_tool_call_events(data):
+                write_stream_event(resp_file, tool_event)
+
+            for finish_reason in stream_finish_reasons(data):
+                write_stream_event(resp_file, {"type": "finish", "finish_reason": finish_reason})
+
+            delta = stream_content_delta(data)
+            if delta:
+                content_parts.append(delta)
+                write_stream_event(resp_file, {"type": "delta", "content": delta})
+            if stream_has_length_finish(data):
+                truncated = True
+
+        content = "".join(content_parts)
+        if truncated:
+            warning = "\n\n[警告：响应被截断，内容可能不完整]"
+            content += warning
+            write_stream_event(resp_file, {"type": "delta", "content": warning})
+
+        return finish_stream(resp_file, signal_file, content)
+
+    except requests.exceptions.Timeout:
+        return fail_stream(resp_file, signal_file, "请求超时（90秒）")
+    except requests.exceptions.RequestException as e:
+        return fail_stream(resp_file, signal_file, f"网络错误: {str(e)}")
+    except Exception as e:
+        return fail_stream(resp_file, signal_file, f"未知错误: {str(e)}")
 
 
 def make_models_request(models_url, api_key):
@@ -1736,6 +1994,15 @@ def main():
     if mode == "models":
         result = make_models_request(api_url, api_key)
         write_response(resp_file, signal_file, result)
+        return
+
+    if mode == "llm_stream":
+        messages, error = read_messages(msg_file)
+        if error:
+            fail_stream(resp_file, signal_file, error)
+            return
+
+        make_api_stream_request(api_url, api_key, model, messages, resp_file, signal_file)
         return
 
     if mode == "elevenlabs":

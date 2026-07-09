@@ -25,6 +25,138 @@ local function file_exists(path)
   return false
 end
 
+local function json_string_field(line, key)
+  line = tostring(line or "")
+  local _, pos = line:find('"' .. tostring(key or "") .. '"%s*:%s*"')
+  if not pos then return nil end
+
+  local out = {}
+  local i = pos + 1
+  while i <= #line do
+    local ch = line:sub(i, i)
+    if ch == '"' then
+      return table.concat(out)
+    elseif ch == "\\" then
+      local esc = line:sub(i + 1, i + 1)
+      if esc == '"' or esc == "\\" or esc == "/" then
+        table.insert(out, esc)
+        i = i + 2
+      elseif esc == "n" then
+        table.insert(out, "\n")
+        i = i + 2
+      elseif esc == "r" then
+        table.insert(out, "\r")
+        i = i + 2
+      elseif esc == "t" then
+        table.insert(out, "\t")
+        i = i + 2
+      elseif esc == "b" or esc == "f" then
+        i = i + 2
+      elseif esc == "u" then
+        local hex = line:sub(i + 2, i + 5)
+        local code = tonumber(hex, 16)
+        if code and code < 128 then
+          table.insert(out, string.char(code))
+        else
+          table.insert(out, "\\u" .. hex)
+        end
+        i = i + 6
+      else
+        table.insert(out, esc)
+        i = i + 2
+      end
+    else
+      table.insert(out, ch)
+      i = i + 1
+    end
+  end
+
+  return nil
+end
+
+local function emit_stream_event(req, event)
+  if req and req.on_stream then
+    pcall(req.on_stream, event)
+  end
+end
+
+local function dispatch_stream_line(req, line)
+  line = tostring(line or ""):gsub("\r$", "")
+  if line == "" then return end
+
+  local event_type = json_string_field(line, "type")
+  if not event_type then return end
+
+  if event_type == "delta" then
+    local content = json_string_field(line, "content") or ""
+    if content ~= "" then
+      req.stream_text = tostring(req.stream_text or "") .. content
+      emit_stream_event(req, { type = "delta", content = content, request_id = req.id })
+    end
+  elseif event_type == "reasoning_delta" then
+    local content = json_string_field(line, "content") or ""
+    if content ~= "" then
+      req.stream_reasoning = tostring(req.stream_reasoning or "") .. content
+      emit_stream_event(req, { type = "reasoning_delta", content = content, request_id = req.id })
+    end
+  elseif event_type == "tool_call" then
+    local tool_event = {
+      type = "tool_call",
+      request_id = req.id,
+      index = json_string_field(line, "index") or "",
+      id = json_string_field(line, "id") or "",
+      call_type = json_string_field(line, "call_type") or "tool",
+      name = json_string_field(line, "name") or "",
+      arguments = json_string_field(line, "arguments") or "",
+    }
+    req.stream_tool_call_count = (tonumber(req.stream_tool_call_count or 0) or 0) + 1
+    emit_stream_event(req, tool_event)
+  elseif event_type == "finish" then
+    req.stream_finish_reason = json_string_field(line, "finish_reason") or ""
+    emit_stream_event(req, { type = "finish", finish_reason = req.stream_finish_reason, request_id = req.id })
+  elseif event_type == "done" then
+    req.stream_final_content = json_string_field(line, "content") or tostring(req.stream_text or "")
+    emit_stream_event(req, { type = "done", content = req.stream_final_content, request_id = req.id })
+  elseif event_type == "error" then
+    req.stream_error = json_string_field(line, "message") or "请求失败"
+    emit_stream_event(req, { type = "error", message = req.stream_error, request_id = req.id })
+  elseif event_type == "start" then
+    emit_stream_event(req, { type = "start", request_id = req.id })
+  end
+end
+
+local function process_stream_events(req, flush_remaining)
+  if not req or not req.is_stream then return end
+
+  local f = io.open(req.resp_file, "r")
+  if f then
+    if req.stream_pos and req.stream_pos > 0 then
+      pcall(function() f:seek("set", req.stream_pos) end)
+    end
+    local chunk = f:read("*a") or ""
+    req.stream_pos = f:seek() or req.stream_pos or 0
+    f:close()
+
+    if chunk ~= "" then
+      req.stream_buffer = tostring(req.stream_buffer or "") .. chunk
+    end
+  end
+
+  while req.stream_buffer and req.stream_buffer ~= "" do
+    local newline = req.stream_buffer:find("\n", 1, true)
+    if not newline then break end
+
+    local line = req.stream_buffer:sub(1, newline - 1)
+    req.stream_buffer = req.stream_buffer:sub(newline + 1)
+    dispatch_stream_line(req, line)
+  end
+
+  if flush_remaining and req.stream_buffer and req.stream_buffer ~= "" then
+    dispatch_stream_line(req, req.stream_buffer)
+    req.stream_buffer = ""
+  end
+end
+
 local function cmd_quote_arg(value)
   value = tostring(value or "")
   return '"' .. value:gsub('"', '""') .. '"'
@@ -218,12 +350,13 @@ end
 -- 启动异步 HTTP 请求
 -- ============================================
 -- v1.0 修改：支持多个并发请求（允许多个 pending_request）
-function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, mode)
+function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, mode, on_stream)
   -- v1.0+ 新增 mode 参数：
   --   mode 省略或为 "llm": 调用 LLM API (默认)
   --   mode 为 "elevenlabs": 调用 ElevenLabs API 生成音频
   
   mode = mode or "llm"
+  local is_stream = mode == "llm_stream"
   
   local request_id = generate_request_id()
   local temp_dir = os.getenv("TEMP") or "C:\\Temp"
@@ -358,6 +491,13 @@ function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, 
     signal_file = signal_file,
     key_file = key_file,  -- 安全：记录密钥文件路径，完成后清理
     on_complete = on_complete,
+    on_stream = on_stream,
+    is_stream = is_stream,
+    stream_pos = 0,
+    stream_buffer = "",
+    stream_text = "",
+    stream_final_content = nil,
+    stream_error = nil,
     start_time = reaper.time_precise(),
     poll_count = 0,
     max_polls = 6000,  -- 600秒(10分钟) / 0.1秒 = 6000次
@@ -396,14 +536,12 @@ function AsyncPipe._poll()
   -- 遍历所有 pending 请求
   for _, req in ipairs(AsyncPipe.pending_requests) do
     req.poll_count = req.poll_count + 1
+    process_stream_events(req, false)
     
     -- 检查信号文件是否存在
     if file_exists(req.signal_file) then
-      -- 信号文件存在，读取响应
-      local resp_f = io.open(req.resp_file, "r")
-      if resp_f then
-        local content = resp_f:read("*a")
-        resp_f:close()
+      if req.is_stream then
+        process_stream_events(req, true)
         
         -- 清理文件（包括密钥文件）
         pcall(function() os.remove(req.msg_file) end)
@@ -413,11 +551,33 @@ function AsyncPipe._poll()
         
         -- 调用回调
         local callback = req.on_complete
-        callback(content, nil)
+        if req.stream_error then
+          callback(nil, req.stream_error)
+        else
+          callback(req.stream_final_content or req.stream_text or "", nil)
+        end
         -- 不加入 remaining_requests，表示已完成
       else
-        -- 信号存在但响应文件读不出，继续等待
-        table.insert(remaining_requests, req)
+        -- 信号文件存在，读取响应
+        local resp_f = io.open(req.resp_file, "r")
+        if resp_f then
+          local content = resp_f:read("*a")
+          resp_f:close()
+
+          -- 清理文件（包括密钥文件）
+          pcall(function() os.remove(req.msg_file) end)
+          pcall(function() os.remove(req.resp_file) end)
+          pcall(function() os.remove(req.signal_file) end)
+          pcall(function() os.remove(req.key_file) end)
+
+          -- 调用回调
+          local callback = req.on_complete
+          callback(content, nil)
+          -- 不加入 remaining_requests，表示已完成
+        else
+          -- 信号存在但响应文件读不出，继续等待
+          table.insert(remaining_requests, req)
+        end
       end
     else
       -- 超时检查（600秒）
@@ -427,7 +587,7 @@ function AsyncPipe._poll()
         pcall(function() os.remove(req.resp_file) end)
         pcall(function() os.remove(req.signal_file) end)
         pcall(function() os.remove(req.key_file) end)
-        
+
         local callback = req.on_complete
         callback(nil, "请求超时（600秒）")
         -- 不加入 remaining_requests
@@ -443,7 +603,14 @@ function AsyncPipe._poll()
   
   -- 如果还有未完成的请求，继续轮询
   if #remaining_requests > 0 then
-    if reaper.Sleep then
+    local has_stream = false
+    for _, req in ipairs(remaining_requests) do
+      if req.is_stream then
+        has_stream = true
+        break
+      end
+    end
+    if reaper.Sleep and not has_stream then
       reaper.Sleep(100)  -- 100ms
     end
     reaper.defer(function()

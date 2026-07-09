@@ -169,6 +169,66 @@ local function clarification_confirm_label(fields, question)
   return "确认说明"
 end
 
+local function compact_single_line(text, limit)
+  text = tostring(text or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  limit = tonumber(limit or 180) or 180
+  if #text > limit then
+    return text:sub(1, limit) .. "..."
+  end
+  return text
+end
+
+local function render_ai_advanced_state(ctx, message, index)
+  local state = ctx.state
+  local status = tostring(message.stream_status or message.advanced_status or "")
+  if message.cancelled then status = "已取消" end
+  if status ~= "" then
+    reaper.ImGui_TextColored(state.ctx, 0x888888FF, status)
+  end
+
+  local reasoning = tostring(message.reasoning_content or "")
+  if reasoning ~= "" then
+    if message.reasoning_streaming then
+      reaper.ImGui_TextColored(state.ctx, 0x8FA7C8FF, "思考中...")
+      reaper.ImGui_Indent(state.ctx, 12)
+      reaper.ImGui_TextWrapped(state.ctx, reasoning .. " ▌")
+      reaper.ImGui_Unindent(state.ctx, 12)
+    else
+      local expanded = message.reasoning_expanded == true
+      if reaper.ImGui_Button(state.ctx, (expanded and "v" or ">") .. "##reasoning_toggle_" .. tostring(index), 22, 22) then
+        message.reasoning_expanded = not expanded
+        expanded = message.reasoning_expanded == true
+      end
+      if expanded then
+        reaper.ImGui_SameLine(state.ctx)
+        reaper.ImGui_TextColored(state.ctx, 0x8FA7C8FF, "思考")
+        reaper.ImGui_Indent(state.ctx, 12)
+        reaper.ImGui_TextWrapped(state.ctx, reasoning)
+        reaper.ImGui_Unindent(state.ctx, 12)
+      end
+    end
+  end
+
+  if message.tool_calls and #message.tool_calls > 0 then
+    reaper.ImGui_TextColored(state.ctx, 0xC8A96AFF, "工具调用")
+    reaper.ImGui_Indent(state.ctx, 12)
+    for tool_index, tool in ipairs(message.tool_calls) do
+      local name = tostring(tool.name or tool.call_type or "tool")
+      local args = compact_single_line(tool.arguments or "", 240)
+      local line = tostring(tool_index) .. ". " .. name
+      if args ~= "" then line = line .. "  " .. args end
+      reaper.ImGui_TextWrapped(state.ctx, line)
+    end
+    reaper.ImGui_Unindent(state.ctx, 12)
+  end
+
+  if message.retryable and not state.waiting then
+    if reaper.ImGui_Button(state.ctx, "重试##retry_ai_" .. tostring(index), 58, 22) then
+      invoke(ctx, "retry_message", index)
+    end
+  end
+end
+
 local function clarification_control_width(ctx)
   local available = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   return math.max(156, math.min(260, available - 8))
@@ -1223,7 +1283,7 @@ function UI.render_chat(ctx)
   local ch = math.max(20, h - bottom_panel_h)
 
   if reaper.ImGui_BeginChild(state.ctx, "chat", w, ch) then
-    for _, m in ipairs(state.messages) do
+    for i, m in ipairs(state.messages) do
       if m.is_system then
         reaper.ImGui_PushStyleColor(state.ctx, reaper.ImGui_Col_Text(), 0xAAAAAAFF)
         reaper.ImGui_TextWrapped(state.ctx, m.content)
@@ -1240,7 +1300,14 @@ function UI.render_chat(ctx)
         reaper.ImGui_Text(state.ctx, "◆ AI")
         reaper.ImGui_PopStyleColor(state.ctx)
         reaper.ImGui_Indent(state.ctx, 16)
-        reaper.ImGui_TextWrapped(state.ctx, m.content)
+        local ai_content = tostring(m.content or "")
+        if m.streaming and ai_content ~= "" then
+          ai_content = ai_content .. " ▌"
+        end
+        if ai_content ~= "" then
+          reaper.ImGui_TextWrapped(state.ctx, ai_content)
+        end
+        render_ai_advanced_state(ctx, m, i)
         reaper.ImGui_Unindent(state.ctx, 16)
       end
       reaper.ImGui_Spacing(state.ctx)
@@ -1287,36 +1354,21 @@ function UI.render_chat(ctx)
       reaper.ImGui_PushStyleColor(state.ctx, reaper.ImGui_Col_ButtonHovered(), 0xFF6666FF)
       reaper.ImGui_PushStyleColor(state.ctx, reaper.ImGui_Col_ButtonActive(), 0xCC3333FF)
       if reaper.ImGui_Button(state.ctx, "⏹ 停止", btn2_w, btn_h) then
-        if async_pipe and async_pipe.cancel then
-          async_pipe.cancel()
-          table.insert(state.messages, {
-            role = "assistant",
-            content = "⏹ 已取消请求",
-            is_system = true
-          })
-        end
-        state.waiting = false
-        state.status = "就绪"
-        if state.pending_operation and state.pending_operation.placeholder then
-          state.pending_operation = nil
-        end
-        if state.audio_waiting then
-          state.audio_pending_count = 0
-          state.audio_waiting = false
-          state.audio_status = "已取消请求"
-        end
+        invoke(ctx, "cancel_generation")
       end
       reaper.ImGui_PopStyleColor(state.ctx, 3)
-    elseif state.mcp_running then
-      if not has_input then
-        reaper.ImGui_BeginDisabled(state.ctx)
-      end
-      btn_clicked = reaper.ImGui_Button(state.ctx, "🌐 发送", btn2_w, btn_h)
-      if not has_input then
-        reaper.ImGui_EndDisabled(state.ctx)
-      end
     else
-      btn_clicked = reaper.ImGui_Button(state.ctx, "发送", btn2_w, btn_h)
+      if state.mcp_running then
+        if not has_input then
+          reaper.ImGui_BeginDisabled(state.ctx)
+        end
+        btn_clicked = reaper.ImGui_Button(state.ctx, "🌐 发送", btn2_w, btn_h)
+        if not has_input then
+          reaper.ImGui_EndDisabled(state.ctx)
+        end
+      else
+        btn_clicked = reaper.ImGui_Button(state.ctx, "发送", btn2_w, btn_h)
+      end
     end
 
     local hint_text
@@ -1381,7 +1433,7 @@ function UI.render(ctx)
   reaper.ImGui_SetNextWindowSize(state.ctx, 640, 720, reaper.ImGui_Cond_FirstUseEver())
 
   local flags = reaper.ImGui_WindowFlags_MenuBar()
-  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.2 智能助手", true, flags)
+  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.3 智能助手", true, flags)
 
   if visible then
     if reaper.ImGui_BeginMenuBar(state.ctx) then

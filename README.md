@@ -1,4 +1,4 @@
-# ReaperAI v1.0.2
+# ReaperAI v1.0.3
 
 ReaperAI 是一个运行在 REAPER 里的 AI 助手。它可以把自然语言指令转换成可确认、可执行的 REAPER 操作，帮助音效师、音乐制作人和游戏音频设计师更快地完成轨道整理、素材处理、Region/Marker 管理、批量操作和音频生成相关工作。
 
