@@ -1128,7 +1128,7 @@ end
 local function strip_intent_block_for_display(text)
   text = tostring(text or "")
   text = text:gsub("%s*%[INTENT%].-%[/INTENT%]%s*", "\n")
-  text = text:gsub("%s*%[MCP_CALL:[^%]]+%]%s*", "\n")
+  text = Operation.strip_mcp_call_blocks(text, "\n")
   text = text:gsub("%s*%[SCRIPT%].-%[/SCRIPT%]%s*", "\n")
   text = text:gsub("^\n+", ""):gsub("\n+$", "")
   if text == "" then

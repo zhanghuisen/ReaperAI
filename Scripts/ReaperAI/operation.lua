@@ -25,17 +25,60 @@ local function operation_trim_script_block(block)
 end
 
 local function operation_repair_mcp_orphan_params(text)
+  return tostring(text or "")
+end
+
+local function operation_mcp_call_end(text, start_pos)
   text = tostring(text or "")
-  local changed = true
-  while changed do
-    local count = 0
-    text = text:gsub("(%[MCP_CALL:[^%]\r\n]-)%](&[%w_]+=[^%]%[\r\n]+)%]", function(prefix, suffix)
-      count = count + 1
-      return prefix .. suffix .. "]"
-    end)
-    changed = count > 0
+  start_pos = tonumber(start_pos or 1) or 1
+  local i = start_pos + 10
+  while i <= #text do
+    local c = text:sub(i, i)
+    if c == "\r" or c == "\n" then
+      return nil
+    end
+    if c == "]" then
+      local call_prefix = text:sub(start_pos + 10, i - 1):lower():gsub("%s+$", "")
+      local closes_created_ref =
+        call_prefix:match("(created%.tracks%[%d+)$") or
+        call_prefix:match("(created%.items%[%d+)$") or
+        call_prefix:match("(created%.markers%[%d+)$") or
+        call_prefix:match("(generated%.tracks%[%d+)$") or
+        call_prefix:match("(generated%.items%[%d+)$") or
+        call_prefix:match("(generated%.markers%[%d+)$") or
+        call_prefix:match("(created%.fx%[%d+)$") or
+        call_prefix:match("(generated%.fx%[%d+)$") or
+        call_prefix:match("(added%.fx%[%d+)$")
+      if not closes_created_ref then
+        return i
+      end
+    end
+    i = i + 1
   end
-  return text
+  return nil
+end
+
+local function operation_strip_mcp_call_blocks(text, replacement)
+  text = tostring(text or "")
+  replacement = replacement == nil and "" or tostring(replacement)
+  local result = {}
+  local pos = 1
+  while pos <= #text do
+    local start_pos = text:find("[MCP_CALL:", pos, true)
+    if not start_pos then
+      table.insert(result, text:sub(pos))
+      break
+    end
+    table.insert(result, text:sub(pos, start_pos - 1))
+    local finish = operation_mcp_call_end(text, start_pos)
+    if not finish then
+      table.insert(result, text:sub(start_pos))
+      break
+    end
+    table.insert(result, replacement)
+    pos = finish + 1
+  end
+  return table.concat(result)
 end
 
 local function operation_parse_executable_steps(text, validate_script_step)
@@ -53,7 +96,7 @@ local function operation_parse_executable_steps(text, validate_script_step)
     end
     
     if mcp_start and (not script_start or mcp_start < script_start) then
-      local mcp_end = text:find("]", mcp_start + 10, true)
+      local mcp_end = operation_mcp_call_end(text, mcp_start)
       if not mcp_end then
         break
       end
@@ -365,7 +408,7 @@ local function operation_sanitize_user_goal_text(text)
   text = tostring(text or "")
   text = operation_strip_script_blocks(text)
   text = text:gsub("```.-```", " ")
-  text = text:gsub("%[MCP_CALL:[^%]]*%]", " ")
+  text = operation_strip_mcp_call_blocks(text, " ")
   text = text:gsub("%f[%w_][%w_]+/[%%w_%-]+%?[^%s，。；;、]*", " ")
   text = text:gsub("%f[%w_]reaper%.[%w_]+%s*%b()", " ")
   return text
@@ -3229,6 +3272,7 @@ end
 Operation.new_id = operation_new_id
 Operation.count_script_blocks = count_script_blocks
 Operation.parse_executable_steps = operation_parse_executable_steps
+Operation.strip_mcp_call_blocks = operation_strip_mcp_call_blocks
 Operation.count_steps_by_kind = operation_count_steps_by_kind
 Operation.preflight_execution_steps = operation_preflight_execution_steps
 Operation.endpoint = operation_endpoint
