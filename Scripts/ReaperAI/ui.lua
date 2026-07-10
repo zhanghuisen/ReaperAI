@@ -111,62 +111,29 @@ local function close_current_popup(ctx)
   if reaper.ImGui_CloseCurrentPopup then pcall(reaper.ImGui_CloseCurrentPopup, ctx) end
 end
 
-local function clarification_option_needs_text(option)
-  local text = tostring(option or "")
-  local lower = text:lower()
-  return text:find("其他", 1, true) ~= nil
-    or text:find("自定义", 1, true) ~= nil
-    or text:find("具体说明", 1, true) ~= nil
-    or text:find("请说明", 1, true) ~= nil
-    or lower:find("other", 1, true) ~= nil
-    or lower:find("custom", 1, true) ~= nil
-    or lower:find("specify", 1, true) ~= nil
-    or lower:find("describe", 1, true) ~= nil
-    or lower:find("freeform", 1, true) ~= nil
-end
-
-local function clarification_option_is_hint(option)
-  local text = tostring(option or "")
-  local lower = text:lower()
-  if text:find("你可以", 1, true) or text:find("例如", 1, true) or text:find("比如", 1, true) then return true end
-  if text:find("举例", 1, true) or text:find("示例", 1, true) or text:find("类似", 1, true) then return true end
-  if text:find("如 ", 1, true) or text:find("如：", 1, true) or text:find("如:", 1, true) then return true end
-  if text:find("请说明", 1, true) or text:find("请描述", 1, true) or text:find("请具体", 1, true) then return true end
-  if text:find("请提供", 1, true) or text:find("等）", 1, true) or text:find("等等", 1, true) then return true end
-  if lower:find("for example", 1, true) or lower:find("e.g.", 1, true) or lower:find("such as", 1, true) then return true end
-  if lower:find("please provide", 1, true) or lower:find("please specify", 1, true) then return true end
-  if #text > 72 then return true end
-  if #text > 54 and (text:find("（", 1, true) or text:find("(", 1, true) or text:find("，", 1, true) or text:find(",", 1, true) or text:find(" or ", 1, true)) then return true end
-  return false
-end
-
-local function clarification_option_is_discardable(option)
-  local text = tostring(option or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  local compact = text:gsub("%s+", "")
-  local lower = compact:lower()
-  if compact == "" then return true end
-  if compact:match("^[%.]+$") or compact:match("^[…]+$") then return true end
-  if compact == "..." or compact == "……" or lower == "etc" or lower == "etc." then return true end
-  return false
-end
-
-local function clarification_input_hint(question, fields, hint_option)
-  if hint_option and hint_option ~= "" then return tostring(hint_option) end
-  return ""
-end
-
-local function clarification_confirm_label(fields, question)
-  local q = tostring(question or "")
-  for _, field in ipairs(fields or {}) do
-    local f = tostring(field or ""):lower()
-    if f == "format" or f == "export_format" or f == "file_format" then return "使用此格式" end
-    if f == "new_name" or f == "name" or f == "target_name" then return "使用此名称" end
-    if f == "action_type" or f == "operation_type" then return "确认这个处理" end
+local function imgui_cond_always()
+  if reaper.ImGui_Cond_Always then
+    return reaper.ImGui_Cond_Always()
   end
-  if q:find("item", 1, true) or q:find("素材", 1, true) or q:find("处理", 1, true) then return "确认这个处理" end
-  if q:find("导出", 1, true) or q:find("格式", 1, true) then return "使用此格式" end
-  if q:find("名字", 1, true) or q:find("命名", 1, true) then return "使用此名称" end
-  return "确认说明"
+  return 0
+end
+
+local function safe_window_size(ctx)
+  if not reaper.ImGui_GetWindowSize then return nil, nil end
+  local ok, w, h = pcall(reaper.ImGui_GetWindowSize, ctx)
+  if ok then return tonumber(w), tonumber(h) end
+  return nil, nil
+end
+
+local function safe_window_collapsed(ctx)
+  if not reaper.ImGui_IsWindowCollapsed then return false end
+  local ok, collapsed = pcall(reaper.ImGui_IsWindowCollapsed, ctx)
+  return ok and collapsed == true
+end
+
+local function request_window_restore(state, width)
+  state.ui_force_window_restore = true
+  state.ui_restore_width = math.max(tonumber(width) or 640, 640)
 end
 
 local function compact_single_line(text, limit)
@@ -227,18 +194,6 @@ local function render_ai_advanced_state(ctx, message, index)
       invoke(ctx, "retry_message", index)
     end
   end
-end
-
-local function clarification_control_width(ctx)
-  local available = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
-  return math.max(156, math.min(260, available - 8))
-end
-
-local function clarification_button_label(option)
-  local text = tostring(option or "")
-  local label = text:gsub("%s*（.*$", ""):gsub("%s*%(.+$", ""):gsub("^%s+", ""):gsub("%s+$", "")
-  if label == "" then label = text end
-  return label
 end
 
 function UI.render_settings(ctx)
@@ -940,22 +895,13 @@ function UI.render_operation_cards(ctx)
     return
   end
 
+  if op.needs_clarification == true or op.contract_status == "needs_clarification" then
+    return
+  end
+
   local user_risk = tostring(op.user_risk or "")
-  local needs_clarification = op.needs_clarification == true or op.contract_status == "needs_clarification"
-  local clarification_button_count = 0
-  local clicked_clarification_answer = nil
-  local clicked_clarification_question_index = nil
-  local needs_clarification_text = false
-  local submit_clarification_text = false
-  local clarification_hint = nil
-  local clarification_placeholder = nil
-  local clarification_submit_label = "确认说明"
   local risk_color = 0x44CC44FF
-  if needs_clarification then
-    risk_color = 0xFFAA44FF
-  elseif op.risk == "blocked" or op.preflight_ok == false then
-    risk_color = 0xFF3333FF
-  elseif user_risk == "destructive" then
+  if user_risk == "destructive" then
     risk_color = 0xFF5555FF
   elseif user_risk == "file_write" then
     risk_color = 0xFFAA44FF
@@ -968,13 +914,10 @@ function UI.render_operation_cards(ctx)
   end
 
   local risk_label = tostring(op.user_risk_label or invoke(ctx, "operation_risk_label", op.risk) or op.risk or "unknown")
-  local title = needs_clarification and "需要澄清" or "待确认操作"
-  reaper.ImGui_TextColored(state.ctx, risk_color, title .. " (" .. risk_label .. ")")
+  reaper.ImGui_TextColored(state.ctx, risk_color, "待确认操作 (" .. risk_label .. ")")
 
-  if needs_clarification then
-    reaper.ImGui_TextWrapped(state.ctx, "状态: 需要确认")
-  elseif op.preflight_ok == false then
-    reaper.ImGui_TextWrapped(state.ctx, "状态: 不可执行，请取消后重新生成")
+  if op.preflight_ok == false then
+    reaper.ImGui_TextWrapped(state.ctx, "状态: 可确认（有预检提示）")
   else
     reaper.ImGui_TextWrapped(state.ctx, "状态: 可执行")
   end
@@ -984,117 +927,28 @@ function UI.render_operation_cards(ctx)
     reaper.ImGui_TextWrapped(state.ctx, "动作内容: " .. table.concat(op.plan_actions, " / "))
   end
 
-  if needs_clarification then
-    local questions = op.clarification_questions or {}
-    if #questions == 0 and op.clarification_prompt and op.clarification_prompt ~= "" then
-      questions = {{ question = op.clarification_prompt, options = op.clarification_options or {}, notes = op.clarification_notes or {}, free_input = true }}
-    end
-    local max_questions = math.min(#questions, 3)
-    for i = 1, max_questions do
-      local q = questions[i] or {}
-      local question = tostring(q.question or "")
-      if question == "" then question = tostring(q.reason or "") end
-      if question == "" then question = "AI 未提供澄清问题，请取消后重新生成。" end
-      reaper.ImGui_TextColored(state.ctx, 0xFFAA44FF, "澄清: " .. question)
-      if q.fields and #q.fields > 0 then
-        reaper.ImGui_TextColored(state.ctx, 0x888888FF, "缺少信息: " .. table.concat(q.fields, " / "))
-      end
-      if q.notes and #q.notes > 0 then
-        for _, note in ipairs(q.notes) do
-          note = tostring(note or "")
-          if note ~= "" then reaper.ImGui_TextWrapped(state.ctx, note) end
-        end
-      end
-      local fields = q.fields or {}
-      clarification_submit_label = clarification_confirm_label(fields, question)
-      if q.placeholder and tostring(q.placeholder) ~= "" then
-        clarification_placeholder = tostring(q.placeholder)
-      end
-      if q.free_input ~= false and fields and #fields > 0 then
-        needs_clarification_text = true
-        clarification_hint = clarification_placeholder or clarification_input_hint(question, fields, nil)
-      end
-      if q.options and #q.options > 0 then
-        local max_options = math.min(#q.options, 6)
-        for option_index = 1, max_options do
-          local answer = tostring(q.options[option_index] or "")
-          if answer ~= "" then
-            if clarification_option_is_discardable(answer) then
-            elseif clarification_option_is_hint(answer) then
-              needs_clarification_text = true
-              reaper.ImGui_TextWrapped(state.ctx, answer)
-            elseif clarification_option_needs_text(answer) then
-              needs_clarification_text = true
-              clarification_hint = clarification_placeholder or clarification_input_hint(question, fields, nil)
-            else
-              clarification_button_count = clarification_button_count + 1
-              local button_w = clarification_control_width(state.ctx)
-              local label = clarification_button_label(answer)
-              if reaper.ImGui_Button(state.ctx, label .. "##clarify_" .. tostring(i) .. "_" .. tostring(option_index), button_w, 26) then
-                clicked_clarification_answer = answer
-                clicked_clarification_question_index = i
-              end
-            end
-          end
-        end
-        if #q.options > max_options then
-          needs_clarification_text = true
-          reaper.ImGui_TextColored(state.ctx, 0x888888FF, "... 还有 " .. tostring(#q.options - max_options) .. " 个选项")
-        end
-      else
-        if q.free_input ~= false then
-          needs_clarification_text = true
-          clarification_hint = clarification_placeholder or clarification_input_hint(question, q.fields or {}, nil)
-        end
-      end
-    end
-    if max_questions == 0 then
-      needs_clarification_text = true
-      clarification_hint = ""
-      reaper.ImGui_TextColored(state.ctx, 0xFFAA44FF, "澄清: AI 未提供澄清问题，请补充你的具体要求，或取消后重新生成。")
-    end
-    if needs_clarification_text or clarification_button_count == 0 then
-      state.clarification_input_text = tostring(state.clarification_input_text or "")
-      local hint = tostring(clarification_placeholder or clarification_hint or "")
-      if hint ~= "" and state.clarification_input_text == "" then
-        reaper.ImGui_TextColored(state.ctx, 0x666666FF, hint)
-      end
-      local input_w = clarification_control_width(state.ctx)
-      reaper.ImGui_PushItemWidth(state.ctx, input_w)
-      local changed, new_value = input_text(state.ctx, "##clarification_input", state.clarification_input_text, 0)
-      if changed then state.clarification_input_text = new_value end
-      reaper.ImGui_PopItemWidth(state.ctx)
-      local has_text = state.clarification_input_text and state.clarification_input_text:gsub("^%s+", ""):gsub("%s+$", "") ~= ""
-      if not has_text and reaper.ImGui_BeginDisabled then reaper.ImGui_BeginDisabled(state.ctx, true) end
-      if reaper.ImGui_Button(state.ctx, clarification_submit_label, input_w, 26) and has_text then
-        submit_clarification_text = true
-      end
-      if not has_text and reaper.ImGui_EndDisabled then reaper.ImGui_EndDisabled(state.ctx) end
-    end
-  else
-    local effects = op.plan_effects or {}
-    local destructive_text = (effects.deletes_project or effects.clears_project or effects.deletes_disk or effects.saves_project) and "有" or "无"
-    reaper.ImGui_TextWrapped(state.ctx, "删除/覆盖: " .. destructive_text)
-    local state_effects = {}
-    if effects.changes_selection then table.insert(state_effects, "selection") end
-    if effects.changes_time_selection then table.insert(state_effects, "time selection") end
-    if effects.moves_cursor then table.insert(state_effects, "cursor") end
-    if #state_effects > 0 then
-      reaper.ImGui_TextWrapped(state.ctx, "State changes: " .. table.concat(state_effects, " / "))
-    end
+  local effects = op.plan_effects or {}
+  local destructive_text = (effects.deletes_project or effects.clears_project or effects.deletes_disk or effects.saves_project) and "有" or "无"
+  reaper.ImGui_TextWrapped(state.ctx, "删除/覆盖: " .. destructive_text)
+  local state_effects = {}
+  if effects.changes_selection then table.insert(state_effects, "selection") end
+  if effects.changes_time_selection then table.insert(state_effects, "time selection") end
+  if effects.moves_cursor then table.insert(state_effects, "cursor") end
+  if #state_effects > 0 then
+    reaper.ImGui_TextWrapped(state.ctx, "State changes: " .. table.concat(state_effects, " / "))
   end
 
   reaper.ImGui_TextWrapped(state.ctx, "来源: " .. tostring(op.source or "unknown") .. " | Step: " .. tostring(#(op.parts or {})) .. " | MCP: " .. tostring(#(op.mcp_calls or {})) .. " | SCRIPT: " .. tostring(op.script_count or 0))
 
-  if not needs_clarification and op.preflight_ok == false and op.preflight_issues and #op.preflight_issues > 0 then
+  if op.preflight_ok == false and op.preflight_issues and #op.preflight_issues > 0 then
     local max_issues = math.min(#op.preflight_issues, 3)
     for i = 1, max_issues do
-      reaper.ImGui_TextColored(state.ctx, 0xFF7777FF, "阻断: " .. tostring(op.preflight_issues[i]))
+      reaper.ImGui_TextColored(state.ctx, 0xFFAA44FF, "提示: " .. tostring(op.preflight_issues[i]))
     end
     if #op.preflight_issues > max_issues then
-      reaper.ImGui_TextColored(state.ctx, 0xFF7777FF, "... 还有 " .. tostring(#op.preflight_issues - max_issues) .. " 个阻断项")
+      reaper.ImGui_TextColored(state.ctx, 0xFFAA44FF, "... 还有 " .. tostring(#op.preflight_issues - max_issues) .. " 条提示")
     end
-  elseif not needs_clarification and op.risk_reasons and #op.risk_reasons > 0 then
+  elseif op.risk_reasons and #op.risk_reasons > 0 then
     local max_reasons = math.min(#op.risk_reasons, 2)
     for i = 1, max_reasons do
       reaper.ImGui_TextColored(state.ctx, 0xAAAAAAFF, "原因: " .. tostring(op.risk_reasons[i]))
@@ -1109,9 +963,9 @@ function UI.render_operation_cards(ctx)
       local status = part.status or "pending"
       local suffix = ""
       if part.needs_clarification then
-        suffix = " | 需要澄清"
-      elseif part.blocked_reason then
-        suffix = " | " .. tostring(part.blocked_reason)
+        suffix = " | 需补充"
+      elseif part.warning_reason then
+        suffix = " | 提示: " .. tostring(part.warning_reason)
       end
       reaper.ImGui_TextWrapped(state.ctx, label .. " | " .. status .. suffix)
     end
@@ -1120,56 +974,29 @@ function UI.render_operation_cards(ctx)
     end
   end
 
-  if not needs_clarification then
-    if user_risk == "destructive" and op.preflight_ok ~= false then
-      reaper.ImGui_TextColored(state.ctx, 0xFF7777FF, "请确认这是你想要的删除/覆盖操作。")
-    elseif user_risk == "file_write" and op.preflight_ok ~= false then
-      reaper.ImGui_TextColored(state.ctx, 0xFFAA44FF, "此操作会导出或写入文件，请确认输出目标。")
-    elseif user_risk == "batch" and op.preflight_ok ~= false then
-      reaper.ImGui_TextColored(state.ctx, 0xDDAA33FF, "此操作会批量影响多个对象，请确认范围。")
-    elseif user_risk == "analysis_state" and op.preflight_ok ~= false then
-      reaper.ImGui_TextColored(state.ctx, 0x66AADDFF, "This analysis may move the cursor or set the time selection; it will not edit project objects.")
-    end
+  if user_risk == "destructive" and op.preflight_ok ~= false then
+    reaper.ImGui_TextColored(state.ctx, 0xFF7777FF, "请确认这是你想要的删除/覆盖操作。")
+  elseif user_risk == "file_write" and op.preflight_ok ~= false then
+    reaper.ImGui_TextColored(state.ctx, 0xFFAA44FF, "此操作会导出或写入文件，请确认输出目标。")
+  elseif user_risk == "batch" and op.preflight_ok ~= false then
+    reaper.ImGui_TextColored(state.ctx, 0xDDAA33FF, "此操作会批量影响多个对象，请确认范围。")
+  elseif user_risk == "analysis_state" and op.preflight_ok ~= false then
+    reaper.ImGui_TextColored(state.ctx, 0x66AADDFF, "This analysis may move the cursor or set the time selection; it will not edit project objects.")
   end
 
   local has_bottom_primary_button = false
-  if needs_clarification then
-  elseif op.preflight_ok == false then
-    reaper.ImGui_PushStyleColor(state.ctx, reaper.ImGui_Col_Button(), 0x666666FF)
-    reaper.ImGui_Button(state.ctx, "不可执行", 100, 28)
-    reaper.ImGui_PopStyleColor(state.ctx)
-    has_bottom_primary_button = true
-  else
-    reaper.ImGui_PushStyleColor(state.ctx, reaper.ImGui_Col_Button(), user_risk == "destructive" and 0xCC3333FF or 0x2E8B57FF)
-    if reaper.ImGui_Button(state.ctx, "确认执行", 100, 28) then
-      invoke(ctx, "execute_pending_operation")
-    end
-    reaper.ImGui_PopStyleColor(state.ctx)
-    has_bottom_primary_button = true
+  reaper.ImGui_PushStyleColor(state.ctx, reaper.ImGui_Col_Button(), user_risk == "destructive" and 0xCC3333FF or 0x2E8B57FF)
+  if reaper.ImGui_Button(state.ctx, "确认执行", 100, 28) then
+    invoke(ctx, "execute_pending_operation")
   end
+  reaper.ImGui_PopStyleColor(state.ctx)
+  has_bottom_primary_button = true
 
   if has_bottom_primary_button then
     reaper.ImGui_SameLine(state.ctx)
   end
   if reaper.ImGui_Button(state.ctx, "取消", 70, 28) then
     invoke(ctx, "cancel_pending_operation")
-  end
-  if submit_clarification_text then
-    clicked_clarification_answer = tostring(state.clarification_input_text or "")
-    clicked_clarification_question_index = clicked_clarification_question_index or 1
-    state.clarification_input_text = ""
-  end
-  if clicked_clarification_answer then
-    local submit_source = submit_clarification_text and "card_text" or "option"
-    local result = invoke(ctx, "submit_clarification_answer", clicked_clarification_answer, clicked_clarification_question_index, submit_source)
-    if result == "clarification_handled" then
-      state.waiting = false
-      state.scroll = true
-    elseif result then
-      state.waiting = true
-      state.status = state.status or "等待 AI 响应..."
-      state.scroll = true
-    end
   end
   reaper.ImGui_Separator(state.ctx)
 end
@@ -1272,7 +1099,7 @@ function UI.render_chat(ctx)
     if state.pending_operation.placeholder then
       operation_panel_h = 150
     else
-      operation_panel_h = (state.pending_operation.needs_clarification and 380) or 235
+      operation_panel_h = 235
     end
   end
   local bottom_panel_h = input_panel_h + operation_panel_h + (state.pending_operation and 8 or 0)
@@ -1374,8 +1201,6 @@ function UI.render_chat(ctx)
     local hint_text
     if state.waiting then
       hint_text = "等待 AI 响应..."
-    elseif state.pending_operation and state.pending_operation.needs_clarification then
-      hint_text = "请在上方澄清卡填写具体说明，或在这里直接回复。"
     else
       hint_text = state.exec_mode and "按 Enter 发送（生成待确认操作）" or "按 Enter 发送（仅咨询）"
     end
@@ -1391,7 +1216,7 @@ function UI.render_chat(ctx)
     local is_elevenlabs = msg:match("^%s*11") ~= nil
     local skip_send = false
 
-    if state.pending_operation and not state.pending_operation.needs_clarification and not is_elevenlabs then
+    if state.pending_operation and not is_elevenlabs then
       table.insert(state.messages, {
         role = "assistant",
         content = "请先确认或取消当前待执行操作，再发送新的执行请求。",
@@ -1430,10 +1255,27 @@ end
 function UI.render(ctx)
   local state = ctx.state
 
-  reaper.ImGui_SetNextWindowSize(state.ctx, 640, 720, reaper.ImGui_Cond_FirstUseEver())
+  if state.ui_force_window_restore then
+    reaper.ImGui_SetNextWindowSize(state.ctx, tonumber(state.ui_restore_width) or 640, 720, imgui_cond_always())
+    state.ui_force_window_restore = false
+  else
+    reaper.ImGui_SetNextWindowSize(state.ctx, 640, 720, reaper.ImGui_Cond_FirstUseEver())
+  end
 
   local flags = reaper.ImGui_WindowFlags_MenuBar()
-  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.3 智能助手", true, flags)
+  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.4 智能助手", true, flags)
+
+  local win_w, win_h = safe_window_size(state.ctx)
+  local collapsed = safe_window_collapsed(state.ctx)
+  local tiny_restored_window = visible and not collapsed and win_h and win_h < 220
+  if collapsed then
+    state.ui_window_was_collapsed = true
+  elseif tiny_restored_window then
+    request_window_restore(state, win_w)
+    state.ui_window_was_collapsed = false
+  elseif visible and win_h and win_h >= 220 then
+    state.ui_window_was_collapsed = false
+  end
 
   if visible then
     if reaper.ImGui_BeginMenuBar(state.ctx) then
@@ -1464,8 +1306,9 @@ function UI.render(ctx)
       UI.render_chat(ctx)
     end
 
-    reaper.ImGui_End(state.ctx)
   end
+
+  reaper.ImGui_End(state.ctx)
 
   return open
 end

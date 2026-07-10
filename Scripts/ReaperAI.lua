@@ -1,11 +1,11 @@
 --[[
-  ReaperAI v1.0.3 - 智能助手
+  ReaperAI v1.0.4 - 智能助手
   
   作者：zhanghuisen
   
   前置要求：ReaImGui（通过 ReaPack 安装）
   
-  版本：1.0.3 (2026-07-09)
+  版本：1.0.4 (2026-07-11)
   核心特性：
   - 异步 HTTP：使用后台 worker，不阻塞 REAPER UI
   - 智能助手：支持咨询与操作双模式
@@ -14,7 +14,6 @@
   - 工程状态快照校验：执行前对比工程状态变化
   - MCP 手动触发：避免自动轮询卡顿
   - 完整的 Unicode 支持：正确处理中文字符
-  - 代码自动修复：处理 AI 生成的常见语法错误
 --]]
 
 -- ============================================
@@ -62,6 +61,10 @@ end
 
 local Prompt = reaperai_load_module("prompt")
 local Operation = reaperai_load_module("operation")
+local ActionProtocol = reaperai_load_module("action_protocol")
+if type(Operation.set_action_protocol) == "function" then
+  Operation.set_action_protocol(ActionProtocol)
+end
 local PlanContract = reaperai_load_module("plan_contract").create({
   parse_call = Operation.parse_call,
   build_call = Operation.build_call,
@@ -179,9 +182,6 @@ local CONFIG = {
   mcp_url       = "http://127.0.0.1:8765",
   mcp_enabled   = true,
   inject_context = true,
-  operation_repair_max_attempts = 1,
-  script_preflight_repair_max_attempts = 1,
-  operation_runtime_repair_max_attempts = 1,
   -- v1.0+：ElevenLabs Voice 由 worker 智能选择，无需手动配置
   -- v1.0+：始终使用异步 HTTP
 
@@ -259,7 +259,7 @@ local state = {
   mcp_capabilities_signature = nil,
   mcp_server_base_path = nil,
   pending_operation = nil, -- Operation Model 阶段1：待确认操作
-  clarification_input_text = "",
+  pending_clarification_context = nil,
   last_user_request = nil,
   last_retry_request = nil,
   last_retry_effective_request = nil,
@@ -267,6 +267,7 @@ local state = {
   active_generation_request = nil,
   active_generation_effective_request = nil,
   last_ai_operation = nil, -- 最近一次已执行的 AI 操作
+  last_failure_evidence = nil,
   runtime_generated_registry = nil,
   conversation_epoch = 0,
   wait_started_at = 0,
@@ -341,7 +342,8 @@ local function reset_conversation_state(reason, opts)
   state.active_generation_message_ref = nil
   state.active_generation_request = nil
   state.active_generation_effective_request = nil
-  state.clarification_input_text = ""
+  state.last_failure_evidence = nil
+  state.pending_clarification_context = nil
   state.runtime_generated_registry = nil
   state.audio_waiting = false
   state.audio_pending_count = 0
@@ -633,8 +635,6 @@ local execute_script
 local execute_lua_sandbox
 local execute_mcp_lua
 local queue_operation_for_confirmation
-local submit_script_preflight_repair_request
-local submit_operation_repair_request
 local execute_pending_operation
 local cancel_pending_operation
 local operation_has_internal_endpoint_error
@@ -762,7 +762,7 @@ local function save_config()
   end
 
   f:write(table.concat({
-    "# ReaperAI v1.0.3 配置文件",
+    "# ReaperAI v1.0.4 配置文件",
     "# 格式: KEY=VALUE",
     "# 现在推荐在 ReaperAI 设置面板中编辑，文件仅作为本地存储。",
     "# 支持配置项: LLM_PROVIDER, LLM_API_KEY, LLM_API_URL, LLM_MODEL, LLM_RECENT_MODELS, ELEVENLABS_API_KEY",
@@ -1104,7 +1104,7 @@ end
 local function init()
   if state.ctx then return true end
   if not reaper.ImGui_CreateContext then
-    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.3", 0)
+    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.4", 0)
     return false
   end
   state.ctx = reaper.ImGui_CreateContext("ReaperAI")
@@ -1128,11 +1128,13 @@ end
 local function strip_intent_block_for_display(text)
   text = tostring(text or "")
   text = text:gsub("%s*%[INTENT%].-%[/INTENT%]%s*", "\n")
+  text = text:gsub("%s*%[TURN%].-%[/TURN%]%s*", "\n")
+  text = text:gsub("%s*%[ACTION_PLAN%].-%[/ACTION_PLAN%]%s*", "\n")
   text = Operation.strip_mcp_call_blocks(text, "\n")
   text = text:gsub("%s*%[SCRIPT%].-%[/SCRIPT%]%s*", "\n")
   text = text:gsub("^\n+", ""):gsub("\n+$", "")
   if text == "" then
-    return "已生成操作卡，请在下方确认或澄清。"
+    return "已生成操作卡，请在下方确认；如果信息不足，我会在对话里继续问你。"
   end
   return text
 end
@@ -1627,6 +1629,13 @@ local function append_intent_contract_prompt(sys)
   return sys
 end
 
+local function append_action_protocol_prompt(sys)
+  if Prompt and type(Prompt.append_action_protocol_prompt) == "function" then
+    return Prompt.append_action_protocol_prompt(sys)
+  end
+  return sys
+end
+
 local function append_capability_snapshot(sys, op, limit)
   local text = nil
   if CuratedCapabilityRegistry and type(CuratedCapabilityRegistry.registry_summary) == "function" then
@@ -1641,29 +1650,81 @@ local function append_capability_snapshot(sys, op, limit)
   return sys
 end
 
-local function user_request_allows_history(user_msg)
-  local text = tostring(user_msg or "")
-  local lower = text:lower()
-  local markers = {
-    "继续", "接着", "沿用", "刚才", "上一步", "上一条", "上次", "之前", "这个", "这些", "它", "它们",
-    "continue", "previous", "last step", "same", "again", "those", "that"
-  }
-  for _, marker in ipairs(markers) do
-    if text:find(marker, 1, true) or lower:find(marker, 1, true) then return true end
+local function classify_failure_text(text)
+  text = tostring(text or ""):lower()
+  if text:find("syntax", 1, true) or text:find("compile", 1, true) or text:find("unfinished", 1, true) then
+    return "syntax_error"
   end
-  return false
+  if text:find("unknown endpoint", 1, true) or text:find("missing endpoint", 1, true) then
+    return "missing_endpoint"
+  end
+  if text:find("requires", 1, true) or text:find("missing", 1, true) or text:find("bad parameter", 1, true) then
+    return "bad_parameter"
+  end
+  if text:find("result verification failed", 1, true) or text:find("verify", 1, true) then
+    return "semantic_mismatch"
+  end
+  if text:find("not found", 1, true) or text:find("no matching", 1, true) or text:find("no selected", 1, true) then
+    return "project_state_impossible"
+  end
+  if text:find("api_gate", 1, true) or text:find("attempt to call", 1, true) or text:find("attempt to index", 1, true) then
+    return "api_limit"
+  end
+  return "unknown"
+end
+
+local function build_failure_evidence(op, results)
+  if not op then return nil end
+  local result_text = table.concat(results or {}, "\n")
+  if result_text == "" then
+    result_text = tostring(op.error_text or op.result_text or "")
+  end
+  local lines = {}
+  table.insert(lines, "previous_request=" .. tostring(op.user_request or state.last_user_request or ""))
+  table.insert(lines, "operation_id=" .. tostring(op.id or ""))
+  table.insert(lines, "source=" .. tostring(op.source or ""))
+  table.insert(lines, "failure_class=" .. classify_failure_text(result_text))
+  table.insert(lines, "result=" .. result_text:gsub("\r", " "):gsub("\n", " | "))
+  for i, step in ipairs(op.parts or {}) do
+    local endpoint = ""
+    if step.kind == "mcp" then
+      endpoint = Operation.endpoint(step.call or "")
+    elseif step.kind == "script" then
+      endpoint = "SCRIPT"
+    else
+      endpoint = tostring(step.kind or "unknown")
+    end
+    local err = tostring(step.runtime_error or step.precheck_error or step.error or "")
+    local line = "step_" .. tostring(i) .. "=" .. tostring(step.kind or "") ..
+      " endpoint=" .. tostring(endpoint) ..
+      " status=" .. tostring(step.status or "")
+    if err ~= "" then
+      line = line .. " error=" .. err:gsub("\r", " "):gsub("\n", " | ")
+    end
+    table.insert(lines, line)
+  end
+  return table.concat(lines, "\n")
+end
+
+local function append_failure_evidence_prompt(sys)
+  local evidence = tostring(state.last_failure_evidence or "")
+  if evidence == "" then return sys end
+  sys = sys .. "\n\n[Previous Failure Evidence]\n"
+  sys = sys .. evidence .. "\n"
+  sys = sys .. "Use this evidence when the user asks to retry, continue, fix, or correct the last operation. Do not repeat the same failed plan unchanged. If the failure is caused by missing app capability or unsupported REAPER/API behavior, explain the engineering reason instead of producing another code block.\n"
+  return sys
 end
 
 local function include_chat_history_for_request(user_msg)
-  if not (state.exec_mode or state.mcp_running) then return true end
-  return user_request_allows_history(user_msg)
+  return true
 end
 
 local function append_turn_isolation_prompt(sys, include_history)
   if not (state.exec_mode or state.mcp_running) then return sys end
   sys = sys .. "\n\n[Turn Isolation]\n"
   if include_history then
-    sys = sys .. "The user explicitly referenced previous context. You may use recent history only to resolve that reference, but the latest user message is still the command to execute.\n"
+    sys = sys .. "Recent chat history is available so user corrections, clarifications, and follow-up answers are not lost. Use it to resolve references and corrections, but execute only the latest requested action.\n"
+    sys = sys .. "Do not repeat, merge, or carry over an old operation unless the latest user message explicitly asks to continue or modify it.\n"
   else
     sys = sys .. "Treat the latest user message as a fresh execution request. Do not carry over, repeat, or combine previous operations unless the latest user message explicitly asks to continue or modify them.\n"
   end
@@ -1678,7 +1739,7 @@ local function build_json(user_msg)
   if state.mcp_running then
     sys = sys .. "\n\n[当前模式: MCP服务器已连接]"
     -- 追加 MCP 功能列表（动态获取）
-    sys = append_capability_snapshot(sys, state.pending_operation or state.last_ai_operation, 14)
+    sys = append_capability_snapshot(sys, (state.pending_clarification_context and state.pending_clarification_context.operation) or state.pending_operation or state.last_ai_operation, 14)
     sys = sys .. "\n\n当 MCP 可用时，优先使用 [MCP_CALL:...] 格式调用上述操作。"
     sys = sys .. "不在 MCP 列表中的操作（如设置颜色、条件判断、复杂逻辑等），请使用 [SCRIPT]...[/SCRIPT] 格式包装 Lua 代码。两者可以混合使用。"
     sys = sys .. "播放/停止工程必须使用 [MCP_CALL:transport/play] 或 [MCP_CALL:transport/stop]，不要创建轨道或裸写 SCRIPT 代替。"
@@ -1696,7 +1757,9 @@ local function build_json(user_msg)
   if state.exec_mode or state.mcp_running then
     sys = append_stable_script_prompt(sys)
     sys = append_intent_contract_prompt(sys)
+    sys = append_action_protocol_prompt(sys)
     sys = append_turn_isolation_prompt(sys, include_history)
+    sys = append_failure_evidence_prompt(sys)
   end
   
   if CONFIG.inject_context then
@@ -1932,7 +1995,7 @@ send_request = function(user_msg, request_opts)
     return false
   end
 
-  if state.pending_operation and state.pending_operation.needs_clarification then
+  if state.pending_clarification_context or (state.pending_operation and state.pending_operation.needs_clarification) then
     return submit_pending_clarification_answer(user_msg, nil, "chat")
   end
 
@@ -1955,7 +2018,7 @@ send_request = function(user_msg, request_opts)
     if state.mcp_running then
       sys = sys .. "\n\n[当前模式: MCP服务器已连接]"
       -- 追加 MCP 功能列表（动态获取）
-      sys = append_capability_snapshot(sys, state.pending_operation or state.last_ai_operation, 14)
+      sys = append_capability_snapshot(sys, (state.pending_clarification_context and state.pending_clarification_context.operation) or state.pending_operation or state.last_ai_operation, 14)
     elseif state.exec_mode then
       sys = sys .. "\n\n[当前模式: 本地执行模式 - MCP fallback + Stable SCRIPT]"
     else
@@ -1966,7 +2029,9 @@ send_request = function(user_msg, request_opts)
     if state.exec_mode or state.mcp_running then
       sys = append_stable_script_prompt(sys)
       sys = append_intent_contract_prompt(sys)
+      sys = append_action_protocol_prompt(sys)
       sys = append_turn_isolation_prompt(sys, include_history)
+      sys = append_failure_evidence_prompt(sys)
     end
     
     if CONFIG.inject_context then
@@ -2505,291 +2570,11 @@ local function operation_step_label(step, index)
   return Operation.step_label(step, index)
 end
 
-local function operation_issue_text(op)
-  local issues = op and op.preflight_issues or {}
-  if not issues or #issues == 0 then
-    return "计划预检未通过，但没有返回详细原因"
-  end
-  local lines = {}
-  local max_items = math.min(#issues, 8)
-  for i = 1, max_items do
-    table.insert(lines, tostring(issues[i]))
-  end
-  if #issues > max_items then
-    table.insert(lines, "... 还有 " .. tostring(#issues - max_items) .. " 条")
-  end
-  return table.concat(lines, "\n")
-end
-
-local function operation_contract_text(op, user_msg)
-  local contract = op and op.intent_contract or nil
-  local lines = {}
-  local goal = contract and contract.goal_text or user_msg
-  table.insert(lines, "净化后的用户目标:")
-  table.insert(lines, tostring(goal or ""))
-
-  local forbidden = contract and contract.forbidden or {}
-  local forbidden_lines = {}
-  if forbidden.delete_project or forbidden.clear_project then table.insert(forbidden_lines, "禁止删除/清空工程对象") end
-  if forbidden.delete_disk then table.insert(forbidden_lines, "禁止删除磁盘文件") end
-  if forbidden.export_file then table.insert(forbidden_lines, "禁止导出/渲染文件") end
-  if forbidden.write_file or forbidden.overwrite then table.insert(forbidden_lines, "禁止写入/覆盖/保存文件") end
-
-  table.insert(lines, "")
-  table.insert(lines, "用户明确禁止:")
-  table.insert(lines, (#forbidden_lines > 0) and table.concat(forbidden_lines, "\n") or "无")
-  return table.concat(lines, "\n")
-end
-
-local function operation_script_preflight_failure_only(op)
-  local has_script_error = false
-  local has_native_action_gate_error = false
-  for _, step in ipairs((op and op.parts) or {}) do
-    if step.kind == "script" then
-      if step.valid == false or step.validation_error or step.precheck_error then
-        has_script_error = true
-      end
-    elseif step.status == "blocked" or step.precheck_error or step.blocked_reason then
-      return false
-    end
-  end
-
-  if not has_script_error then return false end
-  for _, issue in ipairs((op and op.preflight_issues) or {}) do
-    local text = tostring(issue or "")
-    if text:find("Native Action", 1, true) or text:find("Main_OnCommand", 1, true) or text:find("REAPER Action ID", 1, true) then
-      has_native_action_gate_error = true
-    end
-    if not (text:find("SCRIPT", 1, true) or text:find("[/SCRIPT]", 1, true)) then
-      return false
-    end
-  end
-  if has_native_action_gate_error then return false end
-  return true
-end
-
-local function operation_script_preflight_errors_text(op)
-  local lines = {}
-  for i, step in ipairs((op and op.parts) or {}) do
-    if step.kind == "script" and (step.valid == false or step.validation_error or step.precheck_error) then
-      table.insert(lines, "Step " .. tostring(i) .. ": " .. tostring(step.validation_error or step.precheck_error or "SCRIPT 预检失败"))
-    end
-  end
-  if #lines == 0 then
-    return operation_issue_text(op)
-  end
-  return table.concat(lines, "\n")
-end
-
-local function operation_has_native_action_gate_error(op)
-  for _, issue in ipairs((op and op.preflight_issues) or {}) do
-    local text = tostring(issue or "")
-    if text:find("Native Action", 1, true)
-      or text:find("Main_OnCommand", 1, true)
-      or text:find("REAPER Action ID", 1, true) then
-      return true
-    end
-  end
-  return false
-end
-
-local function build_script_preflight_repair_messages(user_msg, bad_text, op, attempt)
-  local sys = CONFIG.system_prompt
-  sys = sys .. "\n\n[当前模式: 自动修复 SCRIPT 预检错误]"
-  if state.mcp_running then
-    sys = append_capability_snapshot(sys, op or state.pending_operation or state.last_ai_operation, 14)
-  end
-  sys = append_stable_script_prompt(sys)
-  sys = sys .. "\n\n你正在修复 AI 生成的 REAPER Lua SCRIPT。"
-  sys = sys .. "\n只修复 SCRIPT 语法/API/闭合/参数等预检错误，不要改变用户目标。"
-  sys = sys .. "\n只输出新的可执行计划，不要解释，不要 Markdown。"
-  sys = sys .. "\n如果原计划包含 MCP_CALL，可保留；如果只需要 SCRIPT，就只输出 [SCRIPT]...[/SCRIPT]。"
-  sys = sys .. "\n修复后的 SCRIPT 必须完整闭合，避免不存在的 REAPER API、危险循环、裸 Main_OnCommand 数字 ID。"
-
-  if CONFIG.inject_context then
-    local ctx = get_project_context()
-    state.last_proj_ctx = ctx
-    sys = sys .. "\n\n" .. ctx
-
-    local sel_ctx = get_selection_context()
-    state.last_selection_context = sel_ctx
-    sys = sys .. "\n\n" .. sel_ctx
-  end
-
-  local repair_user = table.concat({
-    "用户原始需求:",
-    tostring(user_msg or ""),
-    "",
-    operation_contract_text(op, user_msg),
-    "",
-    "预检失败的旧计划:",
-    tostring(bad_text or ""),
-    "",
-    "SCRIPT 预检错误:",
-    operation_script_preflight_errors_text(op),
-    "",
-    "请修复 SCRIPT 并重新输出完整计划。只输出 [MCP_CALL:...] 或 [SCRIPT]...[/SCRIPT]，不要解释。",
-    "SCRIPT 预检修复尝试次数: " .. tostring(attempt or 1),
-  }, "\n")
-
-  return {
-    {role = "system", content = sys},
-    {role = "user", content = repair_user},
-  }
-end
-
-local function build_operation_repair_messages(user_msg, bad_text, op, attempt)
-  local sys = CONFIG.system_prompt
-  sys = sys .. "\n\n[当前模式: 自动修复被阻断的执行计划]"
-  if state.mcp_running then
-    sys = append_capability_snapshot(sys, op or state.pending_operation or state.last_ai_operation, 14)
-  end
-  sys = append_stable_script_prompt(sys)
-  sys = sys .. "\n\n你正在修复一个被 Operation Plan Compiler 阻断的计划。"
-  sys = sys .. "\n只输出新的可执行计划，不要解释，不要 Markdown。"
-  sys = sys .. "\n允许输出一个或多个 [MCP_CALL:...]，也允许输出 [SCRIPT]...[/SCRIPT]。"
-  sys = sys .. "\n必须严格满足用户原始需求，不要重复生成被阻断的删除、清空、覆盖、导出或无关动作。"
-  sys = sys .. "\n如果 MCP 能完整覆盖，优先 MCP；MCP 覆盖不了时用开放式 Stable SCRIPT。"
-
-  if CONFIG.inject_context then
-    local ctx = get_project_context()
-    state.last_proj_ctx = ctx
-    sys = sys .. "\n\n" .. ctx
-
-    local sel_ctx = get_selection_context()
-    state.last_selection_context = sel_ctx
-    sys = sys .. "\n\n" .. sel_ctx
-  end
-
-  local repair_user = table.concat({
-    "用户原始需求:",
-    tostring(user_msg or ""),
-    "",
-    operation_contract_text(op, user_msg),
-    "",
-    "被阻断的旧计划:",
-    tostring(bad_text or ""),
-    "",
-    "阻断原因:",
-    operation_issue_text(op),
-    "",
-    "请重新生成正确计划。只输出 [MCP_CALL:...] 或 [SCRIPT]...[/SCRIPT]，不要解释。",
-    "修复尝试次数: " .. tostring(attempt or 1),
-  }, "\n")
-
-  return {
-    {role = "system", content = sys},
-    {role = "user", content = repair_user},
-  }
-end
-
-local function operation_failed_step_info(op)
-  for i, step in ipairs((op and op.parts) or {}) do
-    if step.status == "failed" or step.runtime_error or step.error then
-      return i, step
-    end
-  end
-  return nil, nil
-end
-
-local function operation_step_source_text(step)
-  if not step then return "" end
-  if step.kind == "mcp" then
-    return "[MCP_CALL:" .. tostring(step.call or "") .. "]"
-  elseif step.kind == "script" then
-    return "[SCRIPT]\n" .. tostring(step.code or "") .. "\n[/SCRIPT]"
-  end
-  return tostring(step.raw or step.kind or "")
-end
-
-local RUNTIME_REPAIR_PRODUCER_ENDPOINTS = {
-  ["track/create"] = true,
-  ["sfx/generate_variants"] = true,
-  ["marker/add"] = true,
-  ["export/batch_regions"] = true,
-  ["export/tracks"] = true,
-  ["export/master"] = true,
-}
-
-local function operation_step_endpoint(step)
-  if not step or step.kind ~= "mcp" then return "" end
-  return Operation.endpoint(step.call or "")
-end
-
-local function append_preflight_issue(op, issue)
-  if not op or not issue or issue == "" then return end
-  op.preflight_issues = op.preflight_issues or {}
-  table.insert(op.preflight_issues, issue)
-  op.preflight_ok = false
-  op.needs_clarification = false
-  op.contract_status = "blocked"
-  op.risk = "blocked"
-  op.status = "pending"
-end
-
 local function apply_project_fact_preflight(op)
   if ProjectFacts and type(ProjectFacts.apply_preflight) == "function" then
     ProjectFacts.apply_preflight(op)
   end
   return op
-end
-
-local function apply_runtime_repair_replay_guard(repair_op, parent_op)
-  if not repair_op or not parent_op then return false end
-  local successful_calls = {}
-  local successful_scripts = {}
-  local successful_producers = {}
-
-  for i, step in ipairs(parent_op.parts or {}) do
-    if step.status == "executed" then
-      if step.kind == "mcp" then
-        local call = tostring(step.call or "")
-        local endpoint = operation_step_endpoint(step)
-        if call ~= "" then successful_calls[call] = i end
-        if RUNTIME_REPAIR_PRODUCER_ENDPOINTS[endpoint] then
-          successful_producers[endpoint] = i
-        end
-      elseif step.kind == "script" then
-        local code = tostring(step.code or step.raw or "")
-        if code ~= "" then successful_scripts[code] = i end
-      end
-    end
-  end
-
-  local blocked = false
-  for i, step in ipairs(repair_op.parts or {}) do
-    local issue = nil
-    if step.kind == "mcp" then
-      local call = tostring(step.call or "")
-      local endpoint = operation_step_endpoint(step)
-      local source_index = successful_calls[call]
-      if source_index then
-        issue = "Runtime repair replay blocked: Step " .. tostring(i) .. " repeats already executed Step " .. tostring(source_index) .. " " .. operation_step_source_text(step)
-      elseif RUNTIME_REPAIR_PRODUCER_ENDPOINTS[endpoint] and successful_producers[endpoint] then
-        issue = "Runtime repair replay blocked: Step " .. tostring(i) .. " repeats producer endpoint " .. tostring(endpoint) .. " already executed at Step " .. tostring(successful_producers[endpoint])
-      end
-    elseif step.kind == "script" then
-      local code = tostring(step.code or step.raw or "")
-      local source_index = successful_scripts[code]
-      if source_index then
-        issue = "Runtime repair replay blocked: Step " .. tostring(i) .. " repeats already executed SCRIPT Step " .. tostring(source_index)
-      end
-    end
-
-    if issue then
-      blocked = true
-      step.status = "blocked"
-      step.blocked_reason = issue
-      step.precheck_error = issue
-      append_preflight_issue(repair_op, issue)
-    end
-  end
-
-  if blocked then
-    repair_op.runtime_replay_blocked = true
-    repair_op.summary = tostring(repair_op.summary or "") .. " | replay blocked"
-  end
-  return blocked
 end
 
 local function mcp_call_has_unresolved_generated_reference(call)
@@ -2806,117 +2591,88 @@ local function mcp_call_has_unresolved_generated_reference(call)
   return false
 end
 
-local function refresh_operation_mcp_calls(op)
-  if not op then return end
-  local calls = {}
-  for _, step in ipairs(op.parts or {}) do
-    if step.kind == "mcp" and step.call and tostring(step.call) ~= "" then
-      table.insert(calls, step.call)
-    end
-  end
-  op.mcp_calls = calls
-end
+function state.start_chat_clarification(op)
+  if not op then return false end
 
-local function materialize_repair_generated_references(op, parent_op)
-  if not op or not op.parts then return false end
-  if (not GeneratedRegistry.has_any(op.generated_registry)) and parent_op and GeneratedRegistry.has_any(parent_op.generated_registry) then
-    op.generated_registry = GeneratedRegistry.clone(parent_op.generated_registry)
-  end
-  if (not GeneratedRegistry.has_any(op.generated_registry)) and GeneratedRegistry.has_any(state.runtime_generated_registry) then
-    op.generated_registry = GeneratedRegistry.clone(state.runtime_generated_registry)
+  local questions = op.clarification_questions or {}
+  local q = questions[1] or {}
+  if (not q.question or tostring(q.question) == "") and op.clarification_prompt and op.clarification_prompt ~= "" then
+    q = {
+      question = op.clarification_prompt,
+      options = op.clarification_options or {},
+      notes = op.clarification_notes or {},
+      fields = op.clarification_fields or {},
+      free_input = true,
+    }
   end
 
-  local registry = GeneratedRegistry.ensure_op(op)
-  if (not registry.last_created_tracks or not registry.last_created_tracks.tracks or #registry.last_created_tracks.tracks == 0)
-    and registry.tracks and #registry.tracks > 0 then
-    local rebuilt = { kind = "track", base_count = tonumber(registry.tracks[1].index or 0) or 0, count = 0, tracks = {} }
-    for _, entry in ipairs(registry.tracks or {}) do
-      table.insert(rebuilt.tracks, {
-        index = entry.index,
-        name = entry.name or "",
-        guid = entry.guid or "",
-      })
-    end
-    rebuilt.count = #rebuilt.tracks
-    registry.last_created_tracks = rebuilt
+  local question = ClarificationResolver.trim(q.question or q.reason or op.clarification_prompt or "")
+  if question == "" then
+    question = "我需要你补充一个细节，确认后我再生成执行卡。"
   end
 
-  if (not registry.last_created_tracks or not registry.last_created_tracks.tracks or #registry.last_created_tracks.tracks == 0) and parent_op then
-    for step_index, step in ipairs(parent_op.parts or {}) do
-      if step.status == "executed" and operation_step_endpoint(step) == "track/create" then
-        local group = { kind = "track", base_count = nil, count = 0, tracks = {} }
-        for raw_name, raw_index in tostring(step.result or ""):gmatch("([^,%\n]-)%s*%(%s*index%s+(%d+)%)") do
-          local index = tonumber(raw_index)
-          local name = tostring(raw_name or ""):gsub("^.*:%s*", ""):gsub("^%s+", ""):gsub("%s+$", "")
-          if index and name ~= "" then
-            local guid = ""
-            if reaper.GetTrack and reaper.GetTrackGUID then
-              local track = reaper.GetTrack(0, index)
-              guid = track and reaper.GetTrackGUID(track) or ""
-            end
-            table.insert(group.tracks, { index = index, name = name, guid = guid })
-            group.base_count = group.base_count and math.min(group.base_count, index) or index
-          end
-        end
-        group.count = #group.tracks
-        if group.count > 0 then
-          GeneratedRegistry.record_created_tracks(registry, group, step_index, step)
-          state.runtime_generated_registry = GeneratedRegistry.ensure(state.runtime_generated_registry)
-          GeneratedRegistry.record_created_tracks(state.runtime_generated_registry, group, step_index, step)
-          break
-        end
-      end
-    end
-  end
-
-  local execution_context = {
-    last_created_tracks = GeneratedRegistry.latest_created_tracks(registry),
-    last_created_items = GeneratedRegistry.latest_created_items(registry),
-    last_created_markers = GeneratedRegistry.latest_created_markers(registry),
-    last_added_fx = GeneratedRegistry.latest_added_fx(registry),
-    generated_registry = registry,
-    prefer_generated_item_for_selected = true,
-    steps = op.parts,
+  state.pending_operation = nil
+  state.pending_clarification_context = {
+    operation = op,
+    question = q,
+    question_index = 1,
+    user_request = tostring(op.user_request or state.last_user_request or ""),
   }
 
-  local changed = false
-  for i, step in ipairs(op.parts or {}) do
-    if step.kind == "mcp" and mcp_call_has_unresolved_generated_reference(step.call or "") then
-      local before = tostring(step.call or "")
-      local note = ObjectBinding.bind_mcp_step_to_created_objects(step, execution_context, i)
-      if note and tostring(step.call or "") ~= before then
-        changed = true
-        step.materialized_binding_note = note
+  local lines = {
+    "我需要先确认一个细节：",
+    question,
+  }
+
+  if q.fields and #q.fields > 0 then
+    table.insert(lines, "缺少信息：" .. table.concat(q.fields, " / "))
+  end
+
+  local added_options = false
+  for _, option in ipairs(q.options or {}) do
+    local text = ClarificationResolver.trim(option)
+    local compact = text:gsub("%s+", "")
+    if text ~= "" and compact ~= "..." and compact ~= "…" then
+      if not added_options then
+        table.insert(lines, "")
+        table.insert(lines, "你可以直接回复：")
+        added_options = true
       end
-      if mcp_call_has_unresolved_generated_reference(step.call or "") then
-        local issue = "Runtime repair unresolved generated reference: Step " .. tostring(i) .. " " .. operation_step_source_text(step)
-        step.status = "blocked"
-        step.blocked_reason = issue
-        step.precheck_error = issue
-        append_preflight_issue(op, issue)
-      end
+      table.insert(lines, "- " .. text)
     end
   end
 
-  if changed then
-    refresh_operation_mcp_calls(op)
+  for _, note in ipairs(q.notes or {}) do
+    local text = ClarificationResolver.trim(note)
+    if text ~= "" then table.insert(lines, text) end
   end
-  return changed
+
+  table.insert(lines, "")
+  table.insert(lines, "直接回复你的选择或补充说明即可。")
+
+  table.insert(state.messages, {
+    role = "assistant",
+    content = table.concat(lines, "\n"),
+  })
+  state.status = "等待用户补充说明"
+  state.scroll = true
+  return "clarification_handled"
 end
 
 local function submit_clarification_to_llm(op, answer, q, mode)
   state.pending_operation = nil
-  state.clarification_input_text = ""
+  state.pending_clarification_context = nil
   local msg, effective = ClarificationResolver.build_llm_message(op, answer, q, mode, state.last_user_request)
   return send_request(msg, { effective_user_request = effective })
 end
 
 submit_pending_clarification_answer = function(answer, question_index, source)
-  local op = state.pending_operation
+  local pending = state.pending_clarification_context
+  local op = (pending and pending.operation) or state.pending_operation
   if not op or not op.needs_clarification then return false end
   answer = ClarificationResolver.trim(answer)
   if answer == "" then
-    state.status = "请先填写澄清内容"
+    state.status = "请先补充说明"
     return "clarification_handled"
   end
 
@@ -2925,7 +2681,7 @@ submit_pending_clarification_answer = function(answer, question_index, source)
   end
 
   local questions = op.clarification_questions or {}
-  local q = questions[tonumber(question_index or 1) or 1] or questions[1] or {
+  local q = (pending and pending.question) or questions[tonumber(question_index or 1) or 1] or questions[1] or {
     question = op.clarification_prompt,
     options = op.clarification_options or {},
     fields = {},
@@ -2946,8 +2702,8 @@ submit_pending_clarification_answer = function(answer, question_index, source)
 
   if new_text and new_text ~= "" then
     state.pending_operation = nil
-    state.clarification_input_text = ""
-    state.status = "澄清已写入计划"
+    state.pending_clarification_context = nil
+    state.status = "补充说明已写入计划"
     local clarified_user_request = tostring(op.user_request or state.last_user_request or "")
       .. "\n\n[USER_CLARIFICATION]\n" .. tostring(answer or "")
     local queued = queue_operation_for_confirmation(new_text, clarified_user_request, 0)
@@ -2963,92 +2719,19 @@ submit_pending_clarification_answer = function(answer, question_index, source)
   return submit_clarification_to_llm(op, answer, q)
 end
 
-local function operation_successful_steps_text(op)
-  local lines = {}
-  for i, step in ipairs((op and op.parts) or {}) do
-    if step.status == "executed" then
-      table.insert(lines, "Step " .. tostring(i) .. ": " .. operation_step_source_text(step))
-      if step.result and step.result ~= "" then
-        table.insert(lines, "结果: " .. tostring(step.result))
-      end
-    end
-  end
-  return (#lines > 0) and table.concat(lines, "\n") or "无"
-end
-
-local function operation_generated_objects_text(op)
-  return GeneratedRegistry.summary((op and op.generated_registry) or nil, 12)
-end
-
-local function build_runtime_repair_messages(op, results, attempt)
-  local user_msg = tostring((op and op.user_request) or state.last_user_request or "")
-  local failed_index, failed_step = operation_failed_step_info(op)
-  local sys = CONFIG.system_prompt
-  sys = sys .. "\n\n[当前模式: 自动修复运行失败的执行计划]"
-  if state.mcp_running then
-    sys = append_capability_snapshot(sys, op or state.pending_operation or state.last_ai_operation, 14)
-  end
-  sys = append_stable_script_prompt(sys)
-  sys = sys .. "\n\n你正在修复一个运行时失败的 REAPER 执行计划。"
-  sys = sys .. "\n只输出新的可执行计划，不要解释，不要 Markdown。"
-  sys = sys .. "\n只修复失败 step 或尚未执行的后续工作，不要重复已经成功执行的 step。"
-  sys = sys .. "\n修复计划仍必须严格满足用户原始需求，并遵守用户明确禁止的动作。"
-  sys = sys .. "\n如果 MCP 目标不存在、fallback 失败或 endpoint 不适合，优先改用更稳的 MCP 参数或 Stable SCRIPT。"
-
-  if CONFIG.inject_context then
-    local ctx = get_project_context()
-    state.last_proj_ctx = ctx
-    sys = sys .. "\n\n" .. ctx
-
-    local sel_ctx = get_selection_context()
-    state.last_selection_context = sel_ctx
-    sys = sys .. "\n\n" .. sel_ctx
-  end
-
-  local repair_user = table.concat({
-    "用户原始需求:",
-    user_msg,
-    "",
-    operation_contract_text(op, user_msg),
-    "",
-    "已成功执行的 step（不要重复执行）:",
-    operation_successful_steps_text(op),
-    "",
-    "已登记执行产物（修复后续步骤必须优先引用这些对象，不要猜轨道号/item号，也不要用 selected=true 代替刚生成对象）:",
-    operation_generated_objects_text(op),
-    "",
-    "产物引用格式: created.items[1] / created.tracks[1] / created.markers[1] / added.fx[1]。例如: [MCP_CALL:item/fade?target=created.items[1]&fade_in_ms=50&fade_out_ms=80]",
-    "",
-    "失败 step:",
-    failed_index and ("Step " .. tostring(failed_index) .. ": " .. operation_step_source_text(failed_step)) or "未知",
-    "",
-    "运行错误:",
-    tostring((failed_step and (failed_step.runtime_error or failed_step.error)) or (op and op.error_text) or table.concat(results or {}, "\n") or "未知错误"),
-    "",
-    "旧计划全文:",
-    tostring((op and op.raw_text) or ""),
-    "",
-    "请重新生成用于修复失败部分的新计划。只输出 [MCP_CALL:...] 或 [SCRIPT]...[/SCRIPT]，不要解释。",
-    "运行修复尝试次数: " .. tostring(attempt or 1),
-  }, "\n")
-
-  return {
-    {role = "system", content = sys},
-    {role = "user", content = repair_user},
-  }
-end
-
 local function show_operation_card(op, repaired)
   apply_project_fact_preflight(op)
+  if op.needs_clarification then
+    return state.start_chat_clarification(op)
+  end
+  state.pending_clarification_context = nil
   state.pending_operation = op
   state.status = Waiting.operation_status(op, state.status)
   local content
-  if op.needs_clarification then
-    content = "AI 需要先确认你的意图，请查看下方澄清卡。"
-  elseif op.preflight_ok == false then
-    content = "已生成操作卡，但预检发现阻断项，请查看下方卡片。"
+  if op.preflight_ok == false then
+    content = "已生成操作卡，预检提示会显示在下方；请确认后再执行。"
   elseif repaired then
-    content = "执行计划已修复，请确认下方卡片后再运行。"
+    content = "已生成操作卡，请确认下方卡片后再运行。"
   else
     content = "已生成操作卡，请确认后执行。"
   end
@@ -3061,296 +2744,14 @@ local function show_operation_card(op, repaired)
   return true
 end
 
-queue_operation_for_confirmation = function(text, user_msg, repair_attempt)
+queue_operation_for_confirmation = function(text, user_msg)
   user_msg = user_msg or state.last_user_request or ""
   local op = create_operation_from_response(text, user_msg)
   if not op then
     return false
   end
   apply_project_fact_preflight(op)
-  repair_attempt = tonumber(repair_attempt or 0) or 0
-  local script_can_repair = state.exec_mode and AsyncPipe and op.preflight_ok == false and not op.needs_clarification and
-    operation_script_preflight_failure_only(op) and repair_attempt < (CONFIG.script_preflight_repair_max_attempts or 1)
-  if script_can_repair then
-    local started = submit_script_preflight_repair_request(user_msg, text, op, repair_attempt + 1)
-    return started and "repairing" or false
-  end
-  local can_repair = state.exec_mode and AsyncPipe and op.preflight_ok == false and not op.needs_clarification
-    and not operation_has_native_action_gate_error(op)
-    and repair_attempt < (CONFIG.operation_repair_max_attempts or 1)
-  if can_repair then
-    local started = submit_operation_repair_request(user_msg, text, op, repair_attempt + 1)
-    return started and "repairing" or false
-  end
-  return show_operation_card(op, repair_attempt > 0 and op.preflight_ok ~= false)
-end
-
-submit_script_preflight_repair_request = function(user_msg, bad_text, op, attempt)
-  if not AsyncPipe then
-    return show_operation_card(op, false)
-  end
-
-  attempt = tonumber(attempt or 1) or 1
-  state.pending_operation = nil
-  Waiting.start(state, "script_repair", user_msg)
-  Waiting.show_operation_placeholder(state, user_msg, { title = "正在自动修复脚本" })
-  table.insert(state.messages, {
-    role = "assistant",
-    content = "🧩 SCRIPT 预检失败，正在自动修复脚本。",
-    is_system = true
-  })
-  state.scroll = true
-
-  local messages = build_script_preflight_repair_messages(user_msg, bad_text, op, attempt)
-  local request_epoch = current_conversation_epoch()
-  local stream = reaperai_begin_llm_stream_display({
-    request_epoch = request_epoch,
-    request_text = user_msg,
-    effective_user_request = user_msg,
-    status_text = "正在显示脚本修复计划..."
-  })
-  local req_id, err = AsyncPipe.send_request(
-    CONFIG.llm_url,
-    CONFIG.llm_key,
-    CONFIG.llm_model,
-    messages,
-    function(response, error)
-      if not is_current_conversation_epoch(request_epoch) then return end
-      if error then
-        stream:fail("SCRIPT 自动修复请求失败: " .. tostring(error))
-        show_operation_card(op, false)
-      else
-        local r, parse_err = parse_response_content(response)
-        if r then
-          stream.after_finish = function()
-            queue_operation_for_confirmation(r, user_msg, attempt)
-          end
-          stream:set_final(r)
-        else
-          stream:fail("SCRIPT 自动修复响应解析失败: " .. tostring(parse_err or "未知错误"))
-          show_operation_card(op, false)
-        end
-      end
-
-      state.scroll = true
-      if AsyncPipe and not AsyncPipe.is_busy() then
-        if state.chat_stream_active then
-          return
-        end
-        state.waiting = false
-        Waiting.clear(state)
-        if state.pending_operation then
-          state.status = Waiting.operation_status(state.pending_operation, state.status)
-        else
-          state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
-        end
-      end
-    end,
-    "llm_stream",
-    function(event)
-      stream:on_event(event)
-    end
-  )
-
-  if not req_id then
-    stream:remove()
-    table.insert(state.messages, {
-      role = "assistant",
-      content = "⚠️ SCRIPT 自动修复启动失败: " .. tostring(err),
-      is_system = true
-    })
-    state.waiting = false
-    Waiting.clear(state)
-    return show_operation_card(op, false)
-  end
-
-  return true
-end
-
-submit_operation_repair_request = function(user_msg, bad_text, op, attempt)
-  if not AsyncPipe then
-    return show_operation_card(op, false)
-  end
-
-  attempt = tonumber(attempt or 1) or 1
-  state.pending_operation = nil
-  Waiting.start(state, "operation_repair", user_msg)
-  Waiting.show_operation_placeholder(state, user_msg, { title = "正在自动修复计划" })
-  table.insert(state.messages, {
-    role = "assistant",
-    content = "🛡 已阻止一个不符合用户需求的执行计划，正在自动修复。",
-    is_system = true
-  })
-  state.scroll = true
-
-  local messages = build_operation_repair_messages(user_msg, bad_text, op, attempt)
-  local request_epoch = current_conversation_epoch()
-  local stream = reaperai_begin_llm_stream_display({
-    request_epoch = request_epoch,
-    request_text = user_msg,
-    effective_user_request = user_msg,
-    status_text = "正在显示修复计划..."
-  })
-  local req_id, err = AsyncPipe.send_request(
-    CONFIG.llm_url,
-    CONFIG.llm_key,
-    CONFIG.llm_model,
-    messages,
-    function(response, error)
-      if not is_current_conversation_epoch(request_epoch) then return end
-      if error then
-        stream:fail("自动修复请求失败: " .. tostring(error))
-        show_operation_card(op, false)
-      else
-        local r, parse_err = parse_response_content(response)
-        if r then
-          stream.after_finish = function()
-            queue_operation_for_confirmation(r, user_msg, attempt)
-          end
-          stream:set_final(r)
-        else
-          stream:fail("自动修复响应解析失败: " .. tostring(parse_err or "未知错误"))
-          show_operation_card(op, false)
-        end
-      end
-
-      state.scroll = true
-      if AsyncPipe and not AsyncPipe.is_busy() then
-        if state.chat_stream_active then
-          return
-        end
-        state.waiting = false
-        Waiting.clear(state)
-        if state.pending_operation then
-          state.status = Waiting.operation_status(state.pending_operation, state.status)
-        else
-          state.status = state.exec_mode and "就绪" or "就绪（咨询模式）"
-        end
-      end
-    end,
-    "llm_stream",
-    function(event)
-      stream:on_event(event)
-    end
-  )
-
-  if not req_id then
-    stream:remove()
-    table.insert(state.messages, {
-      role = "assistant",
-      content = "⚠️ 自动修复启动失败: " .. tostring(err),
-      is_system = true
-    })
-    state.waiting = false
-    Waiting.clear(state)
-    return show_operation_card(op, false)
-  end
-
-  return true
-end
-
-local function submit_runtime_repair_request(op, results)
-  if not AsyncPipe or not op then
-    return false
-  end
-
-  local attempt = tonumber(op.runtime_repair_attempt or 0) + 1
-  if attempt > (CONFIG.operation_runtime_repair_max_attempts or 1) then
-    return false
-  end
-  op.runtime_repair_attempt = attempt
-
-  state.pending_operation = nil
-  Waiting.start(state, "runtime_repair", op.user_request or state.last_user_request or "")
-  Waiting.show_operation_placeholder(state, op.user_request or state.last_user_request or "", { title = "正在修复执行失败" })
-  table.insert(state.messages, {
-    role = "assistant",
-    content = "🔧 执行失败，正在自动生成修复计划。修复后仍会先进入确认卡。",
-    is_system = true
-  })
-  state.scroll = true
-
-  local messages = build_runtime_repair_messages(op, results, attempt)
-  local request_epoch = current_conversation_epoch()
-  local stream = reaperai_begin_llm_stream_display({
-    request_epoch = request_epoch,
-    request_text = op.user_request or state.last_user_request or "",
-    effective_user_request = op.user_request or state.last_user_request or "",
-    status_text = "正在显示运行修复计划..."
-  })
-  local req_id, err = AsyncPipe.send_request(
-    CONFIG.llm_url,
-    CONFIG.llm_key,
-    CONFIG.llm_model,
-    messages,
-    function(response, error)
-      if not is_current_conversation_epoch(request_epoch) then return end
-      if error then
-        stream:fail("运行修复请求失败: " .. tostring(error))
-      else
-        local r, parse_err = parse_response_content(response)
-        if r then
-          local repair_user_request = op.user_request or state.last_user_request or ""
-          local repair_op = create_operation_from_response(r, repair_user_request)
-          if repair_op then
-            repair_op.parent_operation_id = op.id
-            repair_op.runtime_repair_from = op.id
-            repair_op.runtime_repair_attempt = attempt
-            repair_op.generated_registry = GeneratedRegistry.clone(op.generated_registry)
-            repair_op.inherited_generated_registry = GeneratedRegistry.has_any(op.generated_registry)
-            repair_op.repair_prefers_generated_references = user_request_mentions_generated_reference(repair_user_request)
-            materialize_repair_generated_references(repair_op, op)
-            apply_runtime_repair_replay_guard(repair_op, op)
-            stream.after_finish = function()
-              show_operation_card(repair_op, true)
-            end
-            stream:set_final(r)
-          else
-            stream:set_final(r)
-            table.insert(state.messages, {
-              role = "assistant",
-              content = "⚠️ 运行修复响应没有生成可确认操作卡。",
-              is_system = true
-            })
-          end
-        else
-          stream:fail("运行修复响应解析失败: " .. tostring(parse_err or "未知错误"))
-        end
-      end
-
-      state.scroll = true
-      if AsyncPipe and not AsyncPipe.is_busy() then
-        if state.chat_stream_active then
-          return
-        end
-        state.waiting = false
-        Waiting.clear(state)
-        if state.pending_operation then
-          state.status = Waiting.operation_status(state.pending_operation, state.status)
-        else
-          state.status = "操作失败"
-        end
-      end
-    end,
-    "llm_stream",
-    function(event)
-      stream:on_event(event)
-    end
-  )
-
-  if not req_id then
-    stream:remove()
-    table.insert(state.messages, {
-      role = "assistant",
-      content = "⚠️ 运行修复启动失败: " .. tostring(err),
-      is_system = true
-    })
-    state.waiting = false
-    Waiting.clear(state)
-    return false
-  end
-
-  return true
+  return show_operation_card(op, false)
 end
 
 execute_pending_operation = function()
@@ -3364,44 +2765,13 @@ execute_pending_operation = function()
   apply_project_fact_preflight(op)
 
   if op.needs_clarification then
-    state.status = "Needs clarification"
-    table.insert(state.messages, {
-      role = "assistant",
-      content = "This card still needs clarification. Please answer the clarification question first.",
-      is_system = true
-    })
-    state.scroll = true
-    return op
-  end
-  if op.preflight_ok == false then
-    state.status = "操作不可执行"
-    table.insert(state.messages, {
-      role = "assistant",
-      content = "⚠️ 操作不可执行，请取消后重新生成:\n" .. table.concat(op.preflight_issues or {}, "\n"),
-      is_system = true
-    })
-    state.scroll = true
+    state.start_chat_clarification(op)
     return op
   end
 
   apply_project_fact_preflight(op)
   if op.needs_clarification then
-    state.status = "Needs clarification"
-    table.insert(state.messages, {
-      role = "assistant",
-      content = "工程状态刚刚发生变化，执行前需要重新确认目标。请查看下方澄清卡。",
-      is_system = true
-    })
-    state.scroll = true
-    return op
-  elseif op.preflight_ok == false then
-    state.status = "操作不可执行"
-    table.insert(state.messages, {
-      role = "assistant",
-      content = "⚠️ 工程事实预检未通过，请取消后重新生成:\n" .. table.concat(op.preflight_issues or {}, "\n"),
-      is_system = true
-    })
-    state.scroll = true
+    state.start_chat_clarification(op)
     return op
   end
   
@@ -3416,12 +2786,13 @@ execute_pending_operation = function()
     if op.execution_failed then
       op.status = "failed"
       op.error_text = op.result_text
+      state.last_failure_evidence = build_failure_evidence(op, results)
       state.last_ai_operation = op
       if operation_has_internal_endpoint_error(op, results) then
         op.internal_endpoint_error = true
         table.insert(state.messages, {
           role = "assistant",
-          content = "⚠️ 内部端点错误，已停止自动修复:\n" .. op.result_text,
+          content = "⚠️ 内部端点错误:\n" .. op.result_text,
           is_system = true
         })
         state.status = "内部端点错误"
@@ -3432,10 +2803,10 @@ execute_pending_operation = function()
           is_system = true
         })
         state.status = "操作失败"
-        submit_runtime_repair_request(op, results)
       end
     else
       op.status = "executed"
+      state.last_failure_evidence = nil
       state.last_ai_operation = op
       table.insert(state.messages, {
         role = "assistant",
@@ -3447,6 +2818,7 @@ execute_pending_operation = function()
   else
     op.status = "failed"
     op.error_text = "未找到可执行内容或执行无结果"
+    state.last_failure_evidence = build_failure_evidence(op, { op.error_text })
     state.pending_operation = nil
     table.insert(state.messages, {
       role = "assistant",
@@ -3464,7 +2836,7 @@ cancel_pending_operation = function()
   local op = state.pending_operation
   op.status = "cancelled"
   state.pending_operation = nil
-  state.clarification_input_text = ""
+  state.pending_clarification_context = nil
   if op.placeholder then
     cancel_async_requests()
     state.waiting = false
@@ -5153,7 +4525,6 @@ local function make_ui_context()
       get_selection_context = get_selection_context,
       execute_pending_operation = execute_pending_operation,
       cancel_pending_operation = cancel_pending_operation,
-      submit_clarification_answer = submit_pending_clarification_answer,
       cancel_generation = reaperai_cancel_generation,
       retry_message = reaperai_retry_message,
       send_elevenlabs_request = send_elevenlabs_request,
@@ -5248,4 +4619,3 @@ if CONFIG.llm_key == "" or CONFIG.llm_key == "在此填入你的 API Key" then
 end
 
 reaperai_main()
-

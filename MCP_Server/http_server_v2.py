@@ -798,6 +798,7 @@ def parse_mcp_call(call_string: str) -> dict:
         'track/set_volume': generate_set_volume_lua,
         'track/set_pan': generate_set_pan_lua,
         'track/set_color': generate_set_color_lua,
+        'track/clear_color': generate_clear_track_color_lua,
         'track/mute': generate_mute_track_lua,
         'track/solo': generate_solo_track_lua,
         'track/add_fx': generate_add_fx_lua,
@@ -888,6 +889,7 @@ SELECTION_TARGET_ENDPOINTS = {
     'track/set_volume',
     'track/set_pan',
     'track/set_color',
+    'track/clear_color',
     'track/mute',
     'track/solo',
     'track/add_fx',
@@ -905,6 +907,24 @@ SELECTION_TARGET_ENDPOINTS = {
 
 def _selected_token(value):
     return str(value or '').strip().lower() in SELECTED_TOKENS
+
+def _boolish(value):
+    return str(value or '').strip().lower() in ('true', '1', 'yes', 'y', 'on')
+
+def _all_token(value):
+    return str(value or '').strip().lower() in (
+        'all', 'everything', 'entire', 'project', 'all_tracks', 'all_items',
+        'all_markers', 'all_regions', '全部', '所有', '整个工程', '所有轨道',
+        '所有标记', '所有区域'
+    )
+
+def _targets_all(params):
+    return (
+        _boolish(params.get('all', ''))
+        or _all_token(params.get('scope', ''))
+        or _all_token(params.get('target', ''))
+        or _all_token(params.get('tracks', ''))
+    )
 
 def normalize_selection_params(endpoint, params):
     """Normalize natural selected-target aliases before Lua generation."""
@@ -1006,7 +1026,7 @@ local track_label = "missing track target"
 
 def has_explicit_track_target(params, index_key='index', allow_name=True, extra_keys=()):
     selected = str(params.get('selected', '')).lower() in ('true', '1', 'yes')
-    if selected:
+    if selected or _targets_all(params):
         return True
     keys = ['target', 'track_name', index_key, 'track', 'index', *extra_keys]
     if allow_name:
@@ -1169,8 +1189,22 @@ return "✓ Deleted " .. #results .. " selected tracks: " .. table.concat(result
     else:
         match_name = lua_escape_string(params.get('match', params.get('contains', params.get('keyword', ''))))
         name_param = lua_escape_string(params.get('name', ''))
-        delete_all = str(params.get('all', params.get('multiple', 'false'))).lower() in ('true', '1', 'yes')
-        if match_name or delete_all or name_param:
+        delete_all = _targets_all(params) or str(params.get('multiple', 'false')).lower() in ('true', '1', 'yes')
+        if delete_all:
+            return '''
+local deleted = {}
+for i = reaper.CountTracks(0) - 1, 0, -1 do
+    local track = reaper.GetTrack(0, i)
+    if track then
+        local _, name = reaper.GetTrackName(track)
+        table.insert(deleted, 1, name ~= "" and name or ("Track " .. tostring(i + 1)))
+        reaper.DeleteTrack(track)
+    end
+end
+reaper.UpdateArrange()
+return "✓ Deleted " .. tostring(#deleted) .. " track(s): " .. table.concat(deleted, ", ")
+'''
+        if match_name or name_param:
             keyword = match_name or name_param
             return f'''
 local keyword = "{keyword}"
@@ -1266,9 +1300,24 @@ def generate_set_volume_lua(params):
     if guard:
         return guard
     selected = params.get('selected', '').lower() in ('true', '1', 'yes')
+    all_tracks = _targets_all(params)
     lookup = generate_track_lookup_lua(params)
     volume = params.get('volume', '0.7')
     volume = parse_volume_to_lua_value(volume)
+    if all_tracks:
+        return f'''
+local count = 0
+for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    if track then
+        reaper.SetMediaTrackInfo_Value(track, "D_VOL", {volume})
+        count = count + 1
+    end
+end
+reaper.UpdateArrange()
+local vol_db = 20 * (math.log({volume}) / math.log(10))
+return string.format("✓ Set %d track(s) volume to %.1f dB", count, vol_db)
+'''
     if selected:
         return f'''
 local count = 0
@@ -1298,8 +1347,22 @@ def generate_set_pan_lua(params):
     if guard:
         return guard
     selected = params.get('selected', '').lower() in ('true', '1', 'yes')
+    all_tracks = _targets_all(params)
     lookup = generate_track_lookup_lua(params)
     pan = params.get('pan', '0')
+    if all_tracks:
+        return f'''
+local count = 0
+for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    if track then
+        reaper.SetMediaTrackInfo_Value(track, "D_PAN", {pan})
+        count = count + 1
+    end
+end
+reaper.UpdateArrange()
+return string.format("✓ Set %d track(s) pan to %.0f%%", count, math.abs({pan}) * 100)
+'''
     if selected:
         return f'''
 local count = 0
@@ -1324,19 +1387,85 @@ end
 return "✗ Track not found: " .. track_label
 '''
 
+def generate_clear_track_color_lua(params):
+    guard = guard_track_target_lua(params, 'track/clear_color', index_key='track')
+    if guard:
+        return guard
+    selected = params.get('selected', '').lower() in ('true', '1', 'yes')
+    all_tracks = _targets_all(params)
+    lookup = generate_track_lookup_lua(params, index_key='track')
+    if all_tracks:
+        return '''
+local count = 0
+for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    if track then
+        reaper.SetMediaTrackInfo_Value(track, "I_CUSTOMCOLOR", 0)
+        count = count + 1
+    end
+end
+reaper.TrackList_AdjustWindows(false)
+reaper.UpdateArrange()
+return "Cleared custom color on " .. count .. " track(s)"
+'''
+    if selected:
+        return '''
+local count = 0
+for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    if track and reaper.IsTrackSelected(track) then
+        reaper.SetMediaTrackInfo_Value(track, "I_CUSTOMCOLOR", 0)
+        count = count + 1
+    end
+end
+reaper.TrackList_AdjustWindows(false)
+reaper.UpdateArrange()
+return "Cleared custom color on " .. count .. " selected track(s)"
+'''
+    return f'''
+{lookup}
+if track then
+    reaper.SetMediaTrackInfo_Value(track, "I_CUSTOMCOLOR", 0)
+    reaper.TrackList_AdjustWindows(false)
+    reaper.UpdateArrange()
+    return "Cleared custom color on track " .. track_label
+end
+return "Track not found: " .. track_label
+'''
+
 def generate_set_color_lua(params):
     guard = guard_track_target_lua(params, 'track/set_color', index_key='track')
     if guard:
         return guard
     selected = params.get('selected', '').lower() in ('true', '1', 'yes')
+    all_tracks = _targets_all(params)
     lookup = generate_track_lookup_lua(params, index_key='track')
     color_raw = params.get('color', params.get('value', params.get('rgb', 'red')))
+    color_key = str(color_raw or '').strip().lower()
+    clear_color = color_key in ('default', 'clear', 'none', 'reset', 'native', '0', '默认', '默认色', '清除', '清空', '恢复默认')
     r, g, b, label = parse_color_value(color_raw)
+    if clear_color:
+        return generate_clear_track_color_lua(params)
+    color_expr = f'reaper.ColorToNative({r}, {g}, {b}) + 16777216'
     label = lua_escape_string(label)
+    if all_tracks:
+        return f'''
+local count = 0
+local color = {color_expr}
+for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    if track then
+        reaper.SetTrackColor(track, color)
+        count = count + 1
+    end
+end
+reaper.UpdateArrange()
+return "✓ Set " .. count .. " track(s) color to {label}"
+'''
     if selected:
         return f'''
 local count = 0
-local color = reaper.ColorToNative({r}, {g}, {b}) + 16777216
+local color = {color_expr}
 for i = 0, reaper.CountTracks(0) - 1 do
     local track = reaper.GetTrack(0, i)
     if track and reaper.IsTrackSelected(track) then
@@ -1350,7 +1479,7 @@ return "✓ Set " .. count .. " selected track(s) color to {label}"
     return f'''
 {lookup}
 if track then
-    local color = reaper.ColorToNative({r}, {g}, {b}) + 16777216
+    local color = {color_expr}
     reaper.SetTrackColor(track, color)
     reaper.UpdateArrange()
     return "✓ Set track " .. track_label .. " color to {label}"
@@ -1363,9 +1492,24 @@ def generate_mute_track_lua(params):
     if guard:
         return guard
     selected = params.get('selected', '').lower() in ('true', '1', 'yes')
+    all_tracks = _targets_all(params)
     lookup = generate_track_lookup_lua(params)
     mute = params.get('mute', 'true')
     value = '1' if mute.lower() in ('true', '1', 'yes') else '0'
+    if all_tracks:
+        return f'''
+local count = 0
+for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    if track then
+        reaper.SetMediaTrackInfo_Value(track, "B_MUTE", {value})
+        count = count + 1
+    end
+end
+reaper.UpdateArrange()
+local status = {value} == 1 and "muted" or "unmuted"
+return "✓ " .. status .. " " .. count .. " track(s)"
+'''
     if selected:
         return f'''
 local count = 0
@@ -1395,9 +1539,24 @@ def generate_solo_track_lua(params):
     if guard:
         return guard
     selected = params.get('selected', '').lower() in ('true', '1', 'yes')
+    all_tracks = _targets_all(params)
     lookup = generate_track_lookup_lua(params)
     solo = params.get('solo', 'true')
     value = '1' if solo.lower() in ('true', '1', 'yes') else '0'
+    if all_tracks:
+        return f'''
+local count = 0
+for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    if track then
+        reaper.SetMediaTrackInfo_Value(track, "I_SOLO", {value})
+        count = count + 1
+    end
+end
+reaper.UpdateArrange()
+local status = {value} == 1 and "soloed" or "unsoloed"
+return "✓ " .. status .. " " .. count .. " track(s)"
+'''
     if selected:
         return f'''
 local count = 0
@@ -1478,7 +1637,80 @@ return "Added marker '" .. "{name}" .. "' at {time}s"
 '''
 
 def generate_delete_marker_lua(params):
-    idx = str(params.get('index', params.get('target', params.get('marker', ''))) or '').strip()
+    params = params or {}
+    idx = str(params.get('index', params.get('target', params.get('marker', params.get('id', '')))) or '').strip()
+    ids = str(params.get('ids', '') or '').strip()
+    range_value = str(params.get('range', '') or '').strip()
+    start_value = str(params.get('start', params.get('from', '')) or '').strip()
+    end_value = str(params.get('end', params.get('to', '')) or '').strip()
+    name_value = lua_escape_string(params.get('name', params.get('match', '')))
+    all_markers = _targets_all(params) or str(params.get('markers', '')).strip().lower() in ('all', '全部', '所有')
+    if all_markers or ids or range_value or start_value or end_value or name_value:
+        return f'''
+local raw_index = "{lua_escape_string(idx)}"
+local raw_ids = "{lua_escape_string(ids)}"
+local raw_range = "{lua_escape_string(range_value)}"
+local raw_start = "{lua_escape_string(start_value)}"
+local raw_end = "{lua_escape_string(end_value)}"
+local raw_name = "{name_value}"
+local delete_all = {str(all_markers).lower()}
+local wanted = {{}}
+local function trim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
+local function add_id(n) n = tonumber(n); if n then wanted[math.floor(n)] = true end end
+local function add_range(a, b)
+    a = tonumber(a); b = tonumber(b)
+    if not a or not b then return end
+    local lo = math.min(math.floor(a), math.floor(b))
+    local hi = math.max(math.floor(a), math.floor(b))
+    for id = lo, hi do wanted[id] = true end
+end
+local function parse_ids(text)
+    text = trim(text):gsub("^[Mm]arker%s*", ""):gsub("[Mm]", "")
+    local a, b = text:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+    if a and b then add_range(a, b); return end
+    for part in text:gmatch("[^,%s;|]+") do
+        local x, y = part:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+        if x and y then add_range(x, y) else add_id(part) end
+    end
+end
+if raw_index ~= "" then parse_ids(raw_index) end
+if raw_ids ~= "" then parse_ids(raw_ids) end
+if raw_range ~= "" then parse_ids(raw_range) end
+if raw_start ~= "" or raw_end ~= "" then add_range(raw_start, raw_end) end
+local has_wanted = false
+for _ in pairs(wanted) do has_wanted = true; break end
+local name_filter = trim(raw_name)
+if not delete_all and not has_wanted and name_filter == "" then
+    return "ERROR: marker/delete requires index, ids, range, name/match, or all=true."
+end
+local total = reaper.CountProjectMarkers(0)
+local targets = {{}}
+local needle = name_filter:lower()
+for i = 0, total - 1 do
+    local retval, isrgn, pos, rgnend, name, markrgnindex = reaper.EnumProjectMarkers3(0, i)
+    if retval ~= 0 and not isrgn then
+        local id = tonumber(markrgnindex)
+        local by_id = id and wanted[id]
+        local by_name = name_filter ~= "" and tostring(name or ""):lower():find(needle, 1, true) ~= nil
+        if delete_all or by_id or by_name then
+            table.insert(targets, {{ id = id, name = name or "" }})
+        end
+    end
+end
+table.sort(targets, function(a, b) return (a.id or 0) > (b.id or 0) end)
+local deleted = 0
+local labels = {{}}
+for _, marker in ipairs(targets) do
+    if marker.id and reaper.DeleteProjectMarker(0, marker.id, false) then
+        deleted = deleted + 1
+        if #labels < 8 then table.insert(labels, "M" .. tostring(marker.id)) end
+    end
+end
+reaper.UpdateTimeline()
+reaper.UpdateArrange()
+if deleted == 0 then return "ERROR: No matching Marker found." end
+return "Deleted " .. tostring(deleted) .. " Marker(s): " .. table.concat(labels, ", ")
+'''
     if not _is_int_string(idx):
         return '''
 return "ERROR: marker/delete requires explicit marker index; refused to default to marker #0."
@@ -1506,6 +1738,7 @@ def generate_delete_region_lua(params):
     order_start_value = first_nonempty_param(params, ('order_start', 'ordinal_start', 'sequence_start'))
     order_end_value = first_nonempty_param(params, ('order_end', 'ordinal_end', 'sequence_end'))
     name_value = first_nonempty_param(params, ('name', 'match'))
+    all_regions = _targets_all(params) or str(params.get('regions', '')).strip().lower() in ('all', '全部', '所有')
     target = lua_escape_string(target_value)
     start_id = lua_escape_string(start_value)
     end_id = lua_escape_string(end_value)
@@ -1513,6 +1746,7 @@ def generate_delete_region_lua(params):
     order_start = lua_escape_string(order_start_value)
     order_end = lua_escape_string(order_end_value)
     name = lua_escape_string(name_value)
+    delete_all = 'true' if all_regions else 'false'
     lua = r'''
 local raw_target = "__TARGET__"
 local raw_start = "__START__"
@@ -1521,6 +1755,7 @@ local raw_order_target = "__ORDER_TARGET__"
 local raw_order_start = "__ORDER_START__"
 local raw_order_end = "__ORDER_END__"
 local raw_name = "__NAME__"
+local delete_all = __DELETE_ALL__
 local wanted = {}
 local order_wanted = {}
 local function trim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
@@ -1577,7 +1812,7 @@ for _ in pairs(wanted) do has_ids = true; break end
 local has_order = false
 for _ in pairs(order_wanted) do has_order = true; break end
 local name_filter = trim(raw_name)
-if not has_ids and not has_order and name_filter == "" then
+if not delete_all and not has_ids and not has_order and name_filter == "" then
     return { ok=false, message="region/delete requires index, range, ids, start/end, order_start/order_end, name, or match" }
 end
 local function enum_marker(i)
@@ -1604,7 +1839,7 @@ for order_index, region in ipairs(regions) do
     local by_id = id and wanted[id]
     local by_order = order_wanted[order_index] == true
     local by_name = name_filter ~= "" and tostring(region.name or ""):lower():find(needle, 1, true) ~= nil
-    if by_id or by_order or by_name then
+    if delete_all or by_id or by_order or by_name then
         table.insert(targets, region)
     end
 end
@@ -1632,6 +1867,7 @@ return { ok=true, message="Deleted " .. tostring(deleted) .. " Region(s): " .. t
         .replace("__ORDER_START__", order_start)
         .replace("__ORDER_END__", order_end)
         .replace("__NAME__", name)
+        .replace("__DELETE_ALL__", delete_all)
     )
 
 def _bool_param(value):
@@ -4426,7 +4662,8 @@ MCP_ENDPOINTS = {
             "name": "轨道名称；无精确匹配时会按包含匹配",
             "match": "关键词；删除所有精确或包含匹配的轨道",
             "contains": "同 match，用于名字里包含关键词的批量删除",
-            "keyword": "同 match"
+            "keyword": "同 match",
+            "all": "true 表示删除全部轨道"
         },
         "example": "[MCP_CALL:track/delete?match=打击乐]"
     },
@@ -4436,28 +4673,33 @@ MCP_ENDPOINTS = {
         "example": "[MCP_CALL:track/rename?target=打击乐&name=Drums]"
     },
     "track/set_volume": {
-        "description": "设置轨道音量（支持 index、name 或 selected=true）",
-        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "volume": "音量值(0-1或dB值如-12dB)"},
+        "description": "设置轨道音量（支持 index、name、selected=true 或 all=true）",
+        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "all": "true表示全部轨道", "volume": "音量值(0-1或dB值如-12dB)"},
         "example": "[MCP_CALL:track/set_volume?name=打击乐&volume=-10dB]"
     },
     "track/set_pan": {
-        "description": "设置轨道声像（支持 index、name 或 selected=true）",
-        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "pan": "声像值(-1左到1右)"},
+        "description": "设置轨道声像（支持 index、name、selected=true 或 all=true）",
+        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "all": "true表示全部轨道", "pan": "声像值(-1左到1右)"},
         "example": "[MCP_CALL:track/set_pan?name=吉他&pan=-0.5]"
     },
     "track/set_color": {
-        "description": "设置轨道颜色（支持 index、name 或 selected=true；color 支持中文/英文颜色名、#RRGGBB 或 r,g,b）",
-        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "color": "颜色，如 红色/red/#FF0000/255,0,0"},
+        "description": "设置轨道颜色（支持 index、name、selected=true 或 all=true；color 支持中文/英文颜色名、#RRGGBB、r,g,b，或 default/clear 清除自定义颜色）",
+        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "all": "true表示全部轨道", "color": "颜色，如 红色/red/#FF0000/255,0,0；default/clear 表示恢复默认色"},
         "example": "[MCP_CALL:track/set_color?name=bass&color=红色]"
     },
+    "track/clear_color": {
+        "description": "Clear track custom color and restore theme/default track color. Supports index, name, selected=true, or all=true.",
+        "params": {"index": "track index", "name": "track name or keyword", "selected": "true targets selected tracks", "all": "true targets all tracks"},
+        "example": "[MCP_CALL:track/clear_color?all=true]"
+    },
     "track/mute": {
-        "description": "静音/取消静音轨道（支持 index、name 或 selected=true）",
-        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "mute": "true/false"},
+        "description": "静音/取消静音轨道（支持 index、name、selected=true 或 all=true）",
+        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "all": "true表示全部轨道", "mute": "true/false"},
         "example": "[MCP_CALL:track/mute?name=参考&mute=true]"
     },
     "track/solo": {
-        "description": "独奏/取消独奏轨道（支持 index、name 或 selected=true）",
-        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "solo": "true/false"},
+        "description": "独奏/取消独奏轨道（支持 index、name、selected=true 或 all=true）",
+        "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "all": "true表示全部轨道", "solo": "true/false"},
         "example": "[MCP_CALL:track/solo?name=人声&solo=true]"
     },
     "track/add_fx": {
@@ -4503,8 +4745,8 @@ MCP_ENDPOINTS = {
     },
     "marker/delete": {
         "description": "删除标记",
-        "params": {"index": "标记索引"},
-        "example": "[MCP_CALL:marker/delete?index=0]"
+        "params": {"index": "单个 Marker id", "ids": "逗号/空格分隔的 Marker id 列表", "range": "Marker id 范围，如 1-5", "start": "Marker id 范围起点", "end": "Marker id 范围终点", "name": "按 Marker 名称包含匹配", "match": "name 的别名", "all": "true 表示删除所有 Marker，但保留 Region"},
+        "example": "[MCP_CALL:marker/delete?all=true]"
     },
     "region/delete": {
         "description": "Delete Region(s) by displayed Region id, id range, ids list, or name match. Do not use marker/delete for Region deletion.",
@@ -4518,7 +4760,8 @@ MCP_ENDPOINTS = {
             "order_end": "Timeline order end, 1-based after sorting Regions by position",
             "order_range": "Timeline order range such as 5-10",
             "name": "Substring match for Region name",
-            "match": "Alias of name"
+            "match": "Alias of name",
+            "all": "true deletes all Regions"
         },
         "example": "[MCP_CALL:region/delete?start=15&end=20]"
     },

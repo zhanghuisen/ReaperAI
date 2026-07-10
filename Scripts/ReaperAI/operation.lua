@@ -1,5 +1,6 @@
 local Operation = {}
 local PlanContract = nil
+local ActionProtocol = nil
 
 local function operation_new_id()
   return "op_" .. tostring(math.floor((reaper.time_precise() or os.clock()) * 1000)) .. "_" .. tostring(math.random(1000, 9999))
@@ -24,7 +25,7 @@ local function operation_trim_script_block(block)
   return block
 end
 
-local function operation_repair_mcp_orphan_params(text)
+local function operation_normalize_mcp_orphan_params(text)
   return tostring(text or "")
 end
 
@@ -79,7 +80,7 @@ local function operation_parse_executable_steps(text, validate_script_step)
   local steps = {}
   local pos = 1
   text = tostring(text or "")
-  text = operation_repair_mcp_orphan_params(text)
+  text = operation_normalize_mcp_orphan_params(text)
   
   while pos <= #text do
     local mcp_start = text:find("[MCP_CALL:", pos, true)
@@ -106,7 +107,7 @@ local function operation_parse_executable_steps(text, validate_script_step)
           raw = text:sub(mcp_start, mcp_end),
           status = "pending",
           risk = "low",
-          blocked_reason = nil,
+          warning_reason = nil,
           precheck_error = nil,
           runtime_error = nil,
         })
@@ -125,7 +126,7 @@ local function operation_parse_executable_steps(text, validate_script_step)
         block = operation_trim_script_block(text:sub(script_start + 8))
         raw_end = #text
         pos = #text + 1
-        parse_warning = "SCRIPT 未闭合，已阻断执行"
+        parse_warning = "SCRIPT 未闭合，执行可能失败"
       end
       
       if block and #block > 0 then
@@ -145,9 +146,9 @@ local function operation_parse_executable_steps(text, validate_script_step)
           parse_warning = parse_warning,
           valid = valid,
           validation_error = validation_error,
-          status = valid and "pending" or "blocked",
+          status = "pending",
           risk = "medium",
-          blocked_reason = valid and nil or validation_error,
+          warning_reason = valid and nil or validation_error,
           precheck_error = valid and nil or validation_error,
           runtime_error = nil,
         })
@@ -162,9 +163,9 @@ local function operation_parse_executable_steps(text, validate_script_step)
           parse_warning = parse_warning,
           valid = false,
           validation_error = parse_warning .. "：缺少 [/SCRIPT]",
-          status = "blocked",
+          status = "pending",
           risk = "medium",
-          blocked_reason = parse_warning .. "：缺少 [/SCRIPT]",
+          warning_reason = parse_warning .. "：缺少 [/SCRIPT]",
           precheck_error = parse_warning .. "：缺少 [/SCRIPT]",
           runtime_error = nil,
         })
@@ -193,17 +194,17 @@ local function operation_preflight_execution_steps(steps)
     if step.kind == "script" then
       script_index = script_index + 1
       if step.valid == false then
-        step.status = "blocked"
+        step.status = "failed"
         step.error = tostring(step.validation_error or "SCRIPT 校验失败")
         step.precheck_error = step.error
-        step.blocked_reason = step.error
+        step.warning_reason = step.error
         return false, "✗ [预检 Step " .. step_index .. " SCRIPT " .. script_index .. "/" .. total_script .. "] " .. step.error
       end
     elseif step.kind ~= "mcp" then
-      step.status = "blocked"
+      step.status = "failed"
       step.error = "未知 step 类型: " .. tostring(step.kind)
       step.precheck_error = step.error
-      step.blocked_reason = step.error
+      step.warning_reason = step.error
       return false, "⚠️ [预检 Step " .. step_index .. "] " .. step.error
     end
   end
@@ -525,6 +526,7 @@ local ACTION_REGISTRY = {
 }
 
 ACTION_REGISTRY["region/delete"] = { action = "delete", target = "region", label = "Delete Region", effects = { modifies_project = true, deletes_project = true }, verifier = "region/delete", verifier_strength = "strong" }
+ACTION_REGISTRY["track/clear_color"] = { action = "edit", target = "track", label = "Clear track custom color", effects = { modifies_project = true }, verifier = "track/property", verifier_strength = "weak" }
 
 local function operation_action_registry(endpoint)
   local registry = rawget(_G, "reaperai_capability_registry")
@@ -574,7 +576,7 @@ local function operation_add_unique(list, text)
 end
 
 local function operation_raise_risk(current, level)
-  local rank = {low = 1, medium = 2, high = 3, blocked = 4}
+  local rank = {low = 1, medium = 2, high = 3}
   current = current or "low"
   level = level or "low"
   return (rank[level] or 1) > (rank[current] or 1) and level or current
@@ -582,6 +584,7 @@ end
 
 local function operation_target_text(params)
   local p = params or {}
+  if tostring(p.all or ""):lower() == "true" then return "all=true" end
   if tostring(p.selected or ""):lower() == "true" then return "selected=true" end
   if p.name and p.name ~= "" then return "name=" .. p.name end
   if p.track_name and p.track_name ~= "" then return "track_name=" .. p.track_name end
@@ -711,7 +714,7 @@ local function operation_script_risk(code, reasons, scopes)
         risk = operation_raise_risk(risk, "medium")
       end
     else
-      risk = operation_raise_risk(risk, "blocked")
+      risk = operation_raise_risk(risk, "high")
       operation_add_unique(reasons, "Native Action 参数无法静态验证")
       table.insert(scopes, "Native Action -> " .. tostring(command.raw or "dynamic"))
     end
@@ -1299,12 +1302,12 @@ local function operation_script_effects(code)
   }
 end
 
-local function operation_mark_blocked(step, message)
+local function operation_mark_warning(step, message)
   if not step then return end
-  step.status = "blocked"
+  step.status = "pending"
   step.error = message
   step.precheck_error = message
-  step.blocked_reason = message
+  step.warning_reason = message
 end
 
 local function operation_mcp_param_encode(value)
@@ -1998,6 +2001,7 @@ local TRACK_TARGET_CONTRACTS = {
   ["track/set_volume"] = { name_param = "name", index_param = "index", aliases = { "target", "track", "track_name", "name" } },
   ["track/set_pan"] = { name_param = "name", index_param = "index", aliases = { "target", "track", "track_name", "name" } },
   ["track/set_color"] = { name_param = "name", index_param = "index", aliases = { "target", "track", "track_name", "name" } },
+  ["track/clear_color"] = { name_param = "name", index_param = "index", aliases = { "target", "track", "track_name", "name" } },
   ["track/mute"] = { name_param = "name", index_param = "index", aliases = { "target", "track", "track_name", "name" } },
   ["track/solo"] = { name_param = "name", index_param = "index", aliases = { "target", "track", "track_name", "name" } },
   ["track/add_fx"] = { name_param = "track", index_param = "track", aliases = { "target", "track", "track_name", "index" } },
@@ -2112,7 +2116,7 @@ local function operation_bind_recent_created_track_targets(steps)
             table.insert(rewrites, "Target Contract: bound " .. endpoint .. " to created.tracks[" .. tostring(matched_index) .. "]")
           end
         end
-      elseif endpoint ~= "" and endpoint ~= "track/add_fx" and endpoint ~= "track/set_volume" and endpoint ~= "track/set_pan" and endpoint ~= "track/set_color" and endpoint ~= "track/mute" and endpoint ~= "track/solo" and endpoint ~= "track/remove_fx" then
+      elseif endpoint ~= "" and endpoint ~= "track/add_fx" and endpoint ~= "track/set_volume" and endpoint ~= "track/set_pan" and endpoint ~= "track/set_color" and endpoint ~= "track/clear_color" and endpoint ~= "track/mute" and endpoint ~= "track/solo" and endpoint ~= "track/remove_fx" then
         recent_names = nil
       end
     end
@@ -2315,7 +2319,7 @@ local function operation_validate_mcp_params(endpoint, params)
   if endpoint == "track/delete" then
     local has_target = operation_bool_param(p.selected) or operation_bool_param(p.all) or operation_has_value(p, {"index", "name", "match", "contains", "keyword"})
     if not has_target then
-      table.insert(issues, "track/delete 缺少删除目标，需要 selected/index/name/match/contains/keyword")
+      table.insert(issues, "track/delete 缺少删除目标，需要 selected/all/index/name/match/contains/keyword")
     end
   elseif endpoint == "track/create" then
     local count = tonumber(p.count or "") or 1
@@ -2361,6 +2365,10 @@ local function operation_validate_mcp_params(endpoint, params)
     if not operation_has_track_contract_target(endpoint, p) then
       table.insert(issues, "track/set_color 缺少轨道目标，需要 selected/index/name/track/target")
     end
+  elseif endpoint == "track/clear_color" then
+    if not operation_has_track_contract_target(endpoint, p) then
+      table.insert(issues, "track/clear_color requires selected/index/name/track/target/all")
+    end
   elseif endpoint == "track/mute" then
     if not operation_has_track_contract_target(endpoint, p) then
       table.insert(issues, "track/mute 缺少轨道目标，需要 selected/index/name/track/target")
@@ -2385,7 +2393,7 @@ local function operation_validate_mcp_params(endpoint, params)
     end
   elseif endpoint == "region/delete" then
     if not operation_has_value(p, {
-      "index", "id", "region", "target", "range", "ids", "start", "from", "name", "match",
+       "index", "id", "region", "target", "range", "ids", "start", "from", "name", "match", "all",
       "order", "order_index", "order_start", "order_range",
       "ordinal", "ordinal_index", "ordinal_start", "ordinal_range",
       "sequence", "sequence_index", "sequence_start", "sequence_range"
@@ -2394,7 +2402,7 @@ local function operation_validate_mcp_params(endpoint, params)
     end
     local has_start = operation_has_value(p, {"start", "from"})
     local has_end = operation_has_value(p, {"end", "to"})
-    if has_start ~= has_end and not operation_has_value(p, {"range", "ids", "index", "id", "region", "target", "name", "match"}) then
+    if has_start ~= has_end and not operation_has_value(p, {"range", "ids", "index", "id", "region", "target", "name", "match", "all"}) then
       table.insert(issues, "region/delete range requires both start and end")
     end
     local has_order_start = operation_has_value(p, {"order_start", "ordinal_start", "sequence_start"})
@@ -2403,8 +2411,8 @@ local function operation_validate_mcp_params(endpoint, params)
       table.insert(issues, "region/delete timeline order range requires both order_start and order_end")
     end
   elseif endpoint == "marker/delete" then
-    if not operation_has_value(p, {"index", "target", "marker"}) then
-      table.insert(issues, "marker/delete 缺少 index/target/marker 参数")
+    if not operation_has_value(p, {"index", "target", "marker", "id", "ids", "range", "start", "from", "name", "match", "all"}) then
+      table.insert(issues, "marker/delete 缺少 index/ids/range/name/all 参数")
     end
   elseif endpoint == "item/fade" or endpoint == "item/set_fade" then
     if not operation_has_value(p, {
@@ -2460,6 +2468,7 @@ local TRACK_CONTRACT_ENDPOINTS = {
   ["track/set_volume_by_name"] = true,
   ["track/set_pan"] = true,
   ["track/set_color"] = true,
+  ["track/clear_color"] = true,
   ["track/mute"] = true,
   ["track/solo"] = true,
   ["track/add_fx"] = true,
@@ -2849,6 +2858,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
   local effects = {}
   local issues = {}
   local clarifications = {}
+  local warnings = {}
   local user_risk = "normal"
   local risk_label = "普通操作"
   local action_labels = {}
@@ -2864,7 +2874,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
       step.action_label = meta.label or endpoint
       step.effects = meta.effects or {}
       for _, issue in ipairs(operation_validate_mcp_params(endpoint, params)) do
-        operation_mark_blocked(step, issue)
+        operation_mark_warning(step, issue)
         table.insert(issues, "Step " .. tostring(step_index) .. " MCP: " .. issue)
       end
     elseif step.kind == "script" then
@@ -2887,27 +2897,6 @@ local function operation_compile_plan(steps, user_text, llm_intent)
     operation_add_unique(action_labels, step.action_label or step.action or tostring(step.kind))
   end
 
-  for _, clarification in ipairs(operation_collect_contract_clarifications(steps, user_text, intent)) do
-    table.insert(clarifications, clarification)
-  end
-
-  if intent.needs_clarification then
-    local q = ((llm_intent or {}).clarification_question) or ((llm_intent or {}).reason)
-    local opts = ((llm_intent or {}).options) or {}
-    local fields = operation_filter_clarification_fields((llm_intent or {}).fields or {}, intent.primary)
-    if not q or q == "" then
-      q, opts = operation_default_intent_question(intent, effects)
-    end
-    table.insert(clarifications, operation_plan_clarification(q, opts, "llm intent needs clarification", fields, {
-      notes = (llm_intent or {}).notes or {},
-      free_input = (llm_intent or {}).free_input,
-      placeholder = (llm_intent or {}).placeholder or "",
-      intent = (llm_intent or {}).intent or intent.primary,
-    }))
-  end
-  if PlanContract and type(PlanContract.merge_clarifications) == "function" then
-    clarifications = PlanContract.merge_clarifications(clarifications, steps, user_text, intent) or clarifications
-  end
   if effects.deletes_project or effects.clears_project or effects.deletes_disk or effects.saves_project then
     user_risk = "destructive"
     risk_label = "删除/覆盖操作"
@@ -2928,19 +2917,17 @@ local function operation_compile_plan(steps, user_text, llm_intent)
     risk_label = "查询/分析"
   end
 
-  local function block_step(step, index, reason)
-    operation_mark_blocked(step, reason)
-    table.insert(issues, "Step " .. tostring(index) .. ": " .. reason)
-  end
-
-  local function clarify_step(step, index, question, options, reason)
-    table.insert(clarifications, operation_clarification(step, index, question, options, reason))
+  local function warn_step(step, index, reason)
+    if step then
+      step.warning_reason = reason
+    end
+    operation_add_unique(warnings, "Step " .. tostring(index) .. ": " .. tostring(reason or "需要确认"))
   end
 
   if not intent.needs_clarification and intent.wants_read_only and operation_read_only_conflict_effects(effects) then
     for i, step in ipairs(steps or {}) do
       if step.effects and operation_read_only_conflict_effects(step.effects) then
-        clarify_step(step, i, "AI 识别为查询/查看，但生成的计划会修改工程或写入文件。请重新说明你要查看还是要执行修改。", {}, "query intent conflicts with write plan")
+        warn_step(step, i, "AI 识别为查询/查看，但生成的计划会修改工程或写入文件")
       end
     end
   end
@@ -2948,7 +2935,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
   if not intent.needs_clarification and not intent.wants_delete and not intent.wants_freeze and (effects.deletes_project or effects.clears_project) then
     for i, step in ipairs(steps or {}) do
       if step.effects and (step.effects.deletes_project or step.effects.clears_project) then
-        clarify_step(step, i, "AI 生成的计划会删除/清空工程对象，但识别到的意图不是删除。请重新说明是否要删除。", {}, "delete plan conflicts with recognized intent")
+        warn_step(step, i, "计划会删除/清空工程对象，但识别到的意图不是删除")
       end
     end
   end
@@ -2956,7 +2943,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
   if not intent.needs_clarification and not intent.wants_delete and effects.deletes_disk then
     for i, step in ipairs(steps or {}) do
       if step.effects and step.effects.deletes_disk then
-        clarify_step(step, i, "AI 生成的计划会删除磁盘文件，但识别到的意图不是文件删除。请重新说明是否要删除文件。", {}, "disk delete plan conflicts with recognized intent")
+        warn_step(step, i, "计划会删除磁盘文件，但识别到的意图不是文件删除")
       end
     end
   end
@@ -2964,7 +2951,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
   if not intent.needs_clarification and not intent.wants_export and not intent.wants_overwrite and not intent.wants_freeze and (effects.saves_project or effects.exports_file) then
     for i, step in ipairs(steps or {}) do
       if step.effects and (step.effects.saves_project or step.effects.exports_file) then
-        clarify_step(step, i, "AI 生成的计划会导出或保存文件，但识别到的意图不是导出/保存。请重新说明是否要写入文件。", {}, "export plan conflicts with recognized intent")
+        warn_step(step, i, "计划会导出或保存文件，但识别到的意图不是导出/保存")
       end
     end
   end
@@ -2972,7 +2959,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
   if not intent.needs_clarification and intent.wants_rename and not intent.wants_delete and (effects.deletes_project or effects.clears_project) then
     for i, step in ipairs(steps or {}) do
       if step.effects and (step.effects.deletes_project or step.effects.clears_project) then
-        clarify_step(step, i, "AI 识别为改名/命名，但生成的计划会删除/清空对象。请重新说明你要改名还是删除。", {}, "rename intent conflicts with delete plan")
+        warn_step(step, i, "AI 识别为改名/命名，但生成的计划会删除/清空对象")
       end
     end
   end
@@ -2981,7 +2968,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
   if forbidden.delete_project and (effects.deletes_project or effects.clears_project) then
     for i, step in ipairs(steps or {}) do
       if step.effects and (step.effects.deletes_project or step.effects.clears_project) then
-        block_step(step, i, "用户明确禁止删除/清空工程对象")
+        warn_step(step, i, "用户明确禁止删除/清空工程对象")
       end
     end
   end
@@ -2989,7 +2976,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
   if forbidden.delete_disk and effects.deletes_disk then
     for i, step in ipairs(steps or {}) do
       if step.effects and step.effects.deletes_disk then
-        block_step(step, i, "用户明确禁止删除磁盘文件")
+        warn_step(step, i, "用户明确禁止删除磁盘文件")
       end
     end
   end
@@ -2997,7 +2984,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
   if forbidden.export_file and effects.exports_file then
     for i, step in ipairs(steps or {}) do
       if step.effects and step.effects.exports_file then
-        block_step(step, i, "用户明确禁止导出/渲染文件")
+        warn_step(step, i, "用户明确禁止导出/渲染文件")
       end
     end
   end
@@ -3005,13 +2992,9 @@ local function operation_compile_plan(steps, user_text, llm_intent)
   if (forbidden.write_file or forbidden.overwrite) and (effects.writes_disk or effects.saves_project) then
     for i, step in ipairs(steps or {}) do
       if step.effects and (step.effects.writes_disk or step.effects.saves_project) then
-        block_step(step, i, forbidden.overwrite and "用户明确禁止覆盖/写入文件" or "用户明确禁止写入或保存文件")
+        warn_step(step, i, forbidden.overwrite and "用户明确禁止覆盖/写入文件" or "用户明确禁止写入或保存文件")
       end
     end
-  end
-
-  if PlanContract and type(PlanContract.merge_clarifications) == "function" then
-    clarifications = PlanContract.merge_clarifications(clarifications, steps, user_text, intent) or clarifications
   end
 
   return {
@@ -3020,6 +3003,7 @@ local function operation_compile_plan(steps, user_text, llm_intent)
     effects = effects,
     issues = issues,
     clarifications = clarifications,
+    warnings = warnings,
     needs_clarification = #clarifications > 0,
     user_risk = user_risk,
     risk_label = risk_label,
@@ -3039,26 +3023,26 @@ local function operation_preflight_steps(steps)
     if step.kind == "script" then
       script_index = script_index + 1
       if step.valid == false then
-        step.status = "blocked"
+        step.status = "pending"
         step.error = tostring(step.validation_error or "SCRIPT 校验失败")
         step.precheck_error = step.error
-        step.blocked_reason = step.error
+        step.warning_reason = step.error
         table.insert(issues, "Step " .. step_index .. " SCRIPT " .. script_index .. "/" .. total_script .. ": " .. step.error)
       end
     elseif step.kind == "mcp" then
       local endpoint = operation_parse_call(step.call or "")
       if not operation_known_mcp_endpoint(endpoint) then
-        step.status = "blocked"
+        step.status = "pending"
         step.error = "未知 MCP endpoint: " .. tostring(endpoint)
         step.precheck_error = step.error
-        step.blocked_reason = step.error
+        step.warning_reason = step.error
         table.insert(issues, "Step " .. step_index .. " MCP: " .. step.error)
       end
     else
-      step.status = "blocked"
+      step.status = "pending"
       step.error = "未知 step 类型: " .. tostring(step.kind)
       step.precheck_error = step.error
-      step.blocked_reason = step.error
+      step.warning_reason = step.error
       table.insert(issues, "Step " .. step_index .. ": " .. step.error)
     end
   end
@@ -3100,7 +3084,7 @@ local function operation_analyze_steps(steps)
 end
 
 local function operation_risk_label(risk)
-  if risk == "blocked" then return "不可执行" end
+  if risk == "review" then return "需确认" end
   if risk == "high" then return "高风险" end
   if risk == "medium" then return "中风险" end
   return "低风险"
@@ -3150,7 +3134,18 @@ end
 
 local function create_operation_from_response(text, parse_executable_steps, user_text)
   local llm_intent = operation_parse_llm_intent(text)
-  local parts = parse_executable_steps and parse_executable_steps(text) or {}
+  local action_protocol_plan = nil
+  local parts = {}
+  if ActionProtocol and type(ActionProtocol.compile_response) == "function" then
+    local ok, compiled = pcall(ActionProtocol.compile_response, text, { build_call = operation_build_call })
+    if ok and compiled and type(compiled.steps) == "table" and #compiled.steps > 0 then
+      action_protocol_plan = compiled
+      parts = compiled.steps
+    end
+  end
+  if #parts == 0 then
+    parts = parse_executable_steps and parse_executable_steps(text) or {}
+  end
   if #parts == 0 then
     if llm_intent and llm_intent.needs_clarification then
       local q = llm_intent.clarification_question or llm_intent.reason or "AI 未提供澄清问题，请取消后重新生成。"
@@ -3194,6 +3189,11 @@ local function create_operation_from_response(text, parse_executable_steps, user
     return nil
   end
   local rewrite_notes = operation_rewrite_mcp_first(parts)
+  if action_protocol_plan and action_protocol_plan.diagnostics then
+    for _, note in ipairs(action_protocol_plan.diagnostics or {}) do
+      operation_add_unique(rewrite_notes, "ActionProtocol: " .. tostring(note))
+    end
+  end
   
   local mcp_calls = {}
   local script_count = 0
@@ -3223,16 +3223,21 @@ local function create_operation_from_response(text, parse_executable_steps, user
   for _, note in ipairs(rewrite_notes or {}) do
     operation_add_unique(analysis.reasons, note)
   end
-  local risk = needs_clarification and "needs_clarification" or (preflight_ok and analysis.risk or "blocked")
+  for _, warning in ipairs(plan.warnings or {}) do
+    operation_add_unique(analysis.reasons, warning)
+  end
+  local risk = needs_clarification and "needs_clarification" or analysis.risk
   local first_clarification = (plan.clarifications or {})[1]
   local clarification_prompt = first_clarification and first_clarification.question or nil
   local clarification_options = first_clarification and first_clarification.options or {}
   return {
     id = operation_new_id(),
-    source = (#mcp_calls > 0 and script_count > 0) and "mixed" or (#mcp_calls > 0 and "mcp" or "script"),
+    source = action_protocol_plan and "action_protocol" or ((#mcp_calls > 0 and script_count > 0) and "mixed" or (#mcp_calls > 0 and "mcp" or "script")),
     status = "pending",
     user_request = tostring(user_text or ""),
     raw_text = text,
+    action_protocol = action_protocol_plan,
+    turn_type = action_protocol_plan and action_protocol_plan.turn and action_protocol_plan.turn.type or nil,
     mcp_calls = mcp_calls,
     script_count = script_count,
     parts = parts,
@@ -3245,7 +3250,7 @@ local function create_operation_from_response(text, parse_executable_steps, user
     llm_intent = llm_intent or {},
     plan_effects = plan.effects or {},
     plan_actions = plan.action_labels or {},
-    contract_status = needs_clarification and "needs_clarification" or (preflight_ok and "executable" or "blocked"),
+    contract_status = needs_clarification and "needs_clarification" or (preflight_ok and "executable" or "review"),
     needs_clarification = needs_clarification,
     clarification_questions = plan.clarifications or {},
     clarification_prompt = clarification_prompt,
@@ -3261,6 +3266,10 @@ end
 
 local function operation_set_plan_contract(plan_contract)
   PlanContract = plan_contract
+end
+
+local function operation_set_action_protocol(protocol)
+  ActionProtocol = protocol
 end
 
 Operation.new_id = operation_new_id
@@ -3279,6 +3288,7 @@ Operation.action_contract = operation_action_contract
 Operation.known_mcp_endpoint = operation_known_mcp_endpoint
 Operation.set_capability_registry = operation_set_capability_registry
 Operation.set_plan_contract = operation_set_plan_contract
+Operation.set_action_protocol = operation_set_action_protocol
 Operation.add_unique = operation_add_unique
 Operation.raise_risk = operation_raise_risk
 Operation.target_text = operation_target_text

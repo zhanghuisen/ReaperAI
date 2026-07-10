@@ -15,24 +15,6 @@ local WAIT_PHASES = {
     {15, "正在准备确认卡..."},
     {24, "仍在等待完整计划..."},
   },
-  script_repair = {
-    {0, "SCRIPT 预检失败，正在请求自动修复..."},
-    {4, "正在重新生成脚本..."},
-    {10, "正在检查修复后的脚本..."},
-    {18, "正在准备修复后的确认卡..."},
-  },
-  operation_repair = {
-    {0, "计划被阻止，正在请求自动修复..."},
-    {4, "正在重新生成安全执行计划..."},
-    {10, "正在同步工程事实并复检计划..."},
-    {18, "正在等待修复后的确认卡..."},
-  },
-  runtime_repair = {
-    {0, "执行失败，正在生成修复计划..."},
-    {4, "正在分析失败原因..."},
-    {10, "正在重写失败步骤..."},
-    {18, "正在等待修复后的确认卡..."},
-  },
   audio_vox = {
     {0, "正在解析 VOX 语义..."},
     {3, "正在选择声音..."},
@@ -109,7 +91,7 @@ end
 function Waiting.operation_status(op, fallback_status)
   if op and op.placeholder then return op.phase_text or fallback_status or "正在生成执行计划" end
   if op and op.needs_clarification then return "Needs clarification" end
-  if op and op.preflight_ok == false then return "Operation blocked" end
+  if op and op.preflight_ok == false then return "Pending operation" end
   return "Pending operation"
 end
 

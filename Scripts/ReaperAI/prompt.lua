@@ -64,7 +64,8 @@ Prompt.system_prompt = [[你是 ReaperAI v1.0 智能助手。根据用户需求�
 - marker/* - 标记操作
 - item/fade, item/set_fade - 设置素材自身淡入/淡出长度，只改 D_FADEINLEN / D_FADEOUTLEN，不画包络
 - item/fade_shape, item/set_fade_shape - 设置素材 fade 曲线形状，例如 all=true&shape=linear，把曲线改直线
-- track/set_color - 设置轨道颜色，支持 name/index/selected 和 color=红色/#FF0000/r,g,b
+- track/set_color - 设置轨道颜色，支持 name/index/selected/all 和 color=红色/#FF0000/r,g,b
+- track/clear_color - 清除自定义轨道颜色/恢复默认主题颜色，支持 name/index/selected/all
 - envelope/draw - 绘制轨道或Item/Take包络，支持 name/index/selected，lane=volume/pan/mute，shape=line/fade_in/fade_out/sine/pulse/triangle；item/take不写start/end时默认覆盖整个素材；只有用户明确说时间选区时才用 time_selection=true
 - envelope/clear - 清理轨道或Item/Take包络点
 - item/fade、item/fade_shape、envelope/draw、envelope/clear、marker/delete 都必须有明确目标或范围；目标不清时先澄清，不能默认选中项或 index=0。
@@ -204,10 +205,12 @@ function Prompt.append_intent_contract_prompt(sys)
   sys = sys .. "reason=short reason\n"
   sys = sys .. "[/INTENT]\n"
   sys = sys .. "If the user corrects a prior misunderstanding, such as 'not rename, delete', the intent must follow the correction.\n"
-  sys = sys .. "Treat each latest user message as a new execution turn unless it explicitly says to continue, reuse, or modify the previous operation. Never include an old operation in a new plan just because it appears in chat history.\n"
+  sys = sys .. "Use recent chat history to understand corrections, clarifications, and follow-up answers. Execute only the latest requested action; never include an old operation in a new plan just because it appears in chat history.\n"
+  sys = sys .. "If the latest user message contains a clear action plus a concrete target/scope, generate an executable plan. Treat phrases like 'do not X', '不要 X', '保留 X', and '不要删除 X' as constraints, not as a reason to ask the user to repeat the contrast.\n"
+  sys = sys .. "Ask in chat only when a required execution slot is truly missing or the same words still have multiple incompatible meanings after considering the latest message and recent context.\n"
   sys = sys .. "If intent, target, scope, or file format is uncertain, output only [INTENT] with intent=unknown, confidence=low, needs_clarification=true, a clear question, and 2-4 short choices. Do not output [SCRIPT] or [MCP_CALL].\n"
   sys = sys .. "If intent is clear, output [INTENT] first, then the executable plan.\n"
-  sys = sys .. "When needs_clarification=true, you must write the user-facing question and choices yourself. The app will not invent default choices.\n"
+  sys = sys .. "When needs_clarification=true, you must write the user-facing question and choices yourself. The app will ask the user in chat using your question and choices.\n"
   sys = sys .. "choices= must contain only short, directly selectable actions/values. Do not put examples, explanations, parenthetical guidance, or 'please provide...' text in choices.\n"
   sys = sys .. "Never put placeholder fragments such as '...', 'etc', partial examples, or unfinished lists in choices=. If examples are useful, put them in notes=.\n"
   sys = sys .. "Put examples or extra explanation in notes=, separated by |. Notes are shown as plain text, never as buttons.\n"
@@ -224,8 +227,26 @@ function Prompt.append_intent_contract_prompt(sys)
   sys = sys .. "For track mutation endpoints, a target is required: selected=true, index=N, name/track=existing track, or target=created.tracks[N]. Never rely on project first track as a default.\n"
   sys = sys .. "For item, marker, and envelope mutation endpoints, require explicit item/marker/envelope target and clear range where applicable; if missing, clarify instead of generating a default-selected/default-index call.\n"
   sys = sys .. "For region/delete, require an explicit Region id/range/name target. R15-R20 or 编号15到20 means start=15&end=20. 第5到10个Region or bare 5-10的region is ambiguous and must clarify between R ids and timeline order. Timeline order uses order_start/order_end. Do not use marker/delete for Regions.\n"
-  sys = sys .. "Do not ask for clarification only because an operation is risky; clear risky operations should become a confirmation card, not a clarification card.\n"
+  sys = sys .. "Do not ask for clarification only because an operation is risky; clear risky operations should become a confirmation card. If required information is missing, ask in chat through needs_clarification=true.\n"
   sys = sys .. "Never infer delete from rename, or rename from delete. Use destructive=true for delete/clear operations.\n"
+  return sys
+end
+
+function Prompt.append_action_protocol_prompt(sys)
+  sys = sys .. "\n\n[Flexible Action Protocol]\n"
+  sys = sys .. "Before executable output, classify the latest user turn. Use CHAT for pure chat/complaint, ASK only for truly missing required slots, ACTION_PLAN for new executable requests, CORRECTION for fixing the previous plan, CANCEL for cancel/exit/clear, STATUS for progress/result questions, and SCRIPT_DRAFT only when the action registry cannot express a clear executable request.\n"
+  sys = sys .. "A complaint does not block execution. If the user complains and also corrects or requests an action, use CORRECTION or ACTION_PLAN and include the corrected action plan.\n"
+  sys = sys .. "For ACTION_PLAN and CORRECTION, output a short [TURN] block and a short [ACTION_PLAN] block. Do not output analysis, API debates, or long reasoning before the plan.\n"
+  sys = sys .. "Format:\n[TURN]\ntype=ACTION_PLAN|CORRECTION|CHAT|ASK|CANCEL|STATUS|SCRIPT_DRAFT\nsignals=complaint,correction,direct_execute\nuses_context=true|false\nreply=short user-facing sentence\n[/TURN]\n[ACTION_PLAN]\n1. action.name key=value key=value\n2. action.name key=value key=value\n[/ACTION_PLAN]\n"
+  sys = sys .. "One user-visible operation equals one action line. If a request contains multiple operations, split them into multiple action lines instead of writing one large SCRIPT.\n"
+  sys = sys .. "Preferred action names include: transport.play, transport.stop, track.create, track.delete, track.rename, track.volume.set, track.pan.set, track.color.set, track.color.clear, track.mute, track.solo, track.fx.add, track.fx.remove, track.folder.group, marker.add, marker.delete, region.delete, region.rename.batch, item.fade, item.fade_shape, envelope.draw, envelope.clear, sfx.generate_variants, analysis.detect_peaks, analysis.find_loop_points, export.regions, export.tracks, export.master, native.action.\n"
+  sys = sys .. "Selectors are normalized by the app. Use all=true for all objects, selected=true for selected objects, index=N for one object, name=text for named targets, match=text for substring batches, ids=1,2,3 for explicit ids, start/end for Region displayed ids, and order_start/order_end for timeline-order Region ranges.\n"
+  sys = sys .. "For clearing track color/default color, use track.color.clear all=true or selected=true. This means clear custom color / restore default, not black.\n"
+  sys = sys .. "For deleting all Markers but preserving Regions, use marker.delete all=true keep_regions=true. Never use region.delete for Marker-only deletion.\n"
+  sys = sys .. "For deleting Regions, use region.delete with all=true, ids=, start/end, order_start/order_end, name=, or match=. Never route Region deletion through marker.delete.\n"
+  sys = sys .. "Only use [SCRIPT] when SCRIPT_DRAFT is necessary because no action or MCP endpoint can express the request. SCRIPT must be short and should be split into separate steps when the request has separate operations.\n"
+  sys = sys .. "If the latest user says direct execute / retry / continue and a previous pending plan exists, use the previous context and output the corrected or same ACTION_PLAN quickly; do not rethink from scratch.\n"
+  sys = sys .. "On prior failure, read the provided failure evidence, identify whether the cause is syntax_error, missing_endpoint, bad_parameter, api_limit, semantic_mismatch, or project_state_impossible. Do not repeat the same failed plan unchanged; if the cause is an engineering capability gap, explain the reason instead of producing code.\n"
   return sys
 end
 

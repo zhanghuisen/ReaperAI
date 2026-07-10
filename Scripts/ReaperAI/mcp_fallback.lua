@@ -14,6 +14,23 @@ local function selected_token(v)
   return v == "selected" or v == "selection" or v == "current" or v == "当前" or v == "选中" or v == "已选中"
 end
 
+local function boolish(v)
+  v = tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+  return v == "true" or v == "1" or v == "yes" or v == "y" or v == "on"
+end
+
+local function all_token(v)
+  v = tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+  return v == "all" or v == "everything" or v == "entire" or v == "project" or
+    v == "all_tracks" or v == "all_items" or v == "all_markers" or v == "all_regions" or
+    v == "全部" or v == "所有" or v == "整个工程" or v == "所有轨道" or v == "所有标记" or v == "所有区域"
+end
+
+local function targets_all(params)
+  params = params or {}
+  return boolish(params.all) or all_token(params.scope) or all_token(params.target) or all_token(params.tracks)
+end
+
 local function split_lua_list_code(raw_var, list_var)
   return "local function trim(s) return (s or ''):gsub('^%s+', ''):gsub('%s+$', '') end\n" ..
     "local function split_list(s)\n" ..
@@ -48,6 +65,7 @@ local function region_delete_fallback_code(params)
   local order_start = first_nonempty_param(params, {"order_start", "ordinal_start", "sequence_start"})
   local order_end = first_nonempty_param(params, {"order_end", "ordinal_end", "sequence_end"})
   local name = first_nonempty_param(params, {"name", "match"})
+  local delete_all = targets_all(params) or all_token(params.regions)
   return
     "local raw_target = " .. lua_quote(target) .. "\n" ..
     "local raw_start = " .. lua_quote(start_id) .. "\n" ..
@@ -56,6 +74,7 @@ local function region_delete_fallback_code(params)
     "local raw_order_start = " .. lua_quote(order_start) .. "\n" ..
     "local raw_order_end = " .. lua_quote(order_end) .. "\n" ..
     "local raw_name = " .. lua_quote(name) .. "\n" ..
+    "local delete_all = " .. tostring(delete_all) .. "\n" ..
     "local wanted = {}\n" ..
     "local order_wanted = {}\n" ..
     "local function trim(s) return tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', '') end\n" ..
@@ -83,7 +102,7 @@ local function region_delete_fallback_code(params)
     "local has_ids = false; for _ in pairs(wanted) do has_ids = true; break end\n" ..
     "local has_order = false; for _ in pairs(order_wanted) do has_order = true; break end\n" ..
     "local name_filter = trim(raw_name)\n" ..
-    "if not has_ids and not has_order and name_filter == '' then return { ok=false, message='region/delete requires index, range, ids, start/end, order_start/order_end, name, or match' } end\n" ..
+    "if not delete_all and not has_ids and not has_order and name_filter == '' then return { ok=false, message='region/delete requires index, range, ids, start/end, order_start/order_end, name, match, or all=true' } end\n" ..
     "local function enum_marker(i) if reaper.EnumProjectMarkers3 then return reaper.EnumProjectMarkers3(0, i) end; return reaper.EnumProjectMarkers(i) end\n" ..
     "local marker_total = reaper.CountProjectMarkers(0)\n" ..
     "local regions = {}\n" ..
@@ -99,7 +118,7 @@ local function region_delete_fallback_code(params)
     "  local by_id = id and wanted[id]\n" ..
     "  local by_order = order_wanted[order_index] == true\n" ..
     "  local by_name = name_filter ~= '' and tostring(region.name or ''):lower():find(needle, 1, true) ~= nil\n" ..
-    "  if by_id or by_order or by_name then table.insert(targets, region) end\n" ..
+    "  if delete_all or by_id or by_order or by_name then table.insert(targets, region) end\n" ..
     "end\n" ..
     "table.sort(targets, function(a, b) return (a.id or 0) > (b.id or 0) end)\n" ..
     "local deleted = 0\n" ..
@@ -164,6 +183,50 @@ local function track_target_index_name(params, allow_name)
     name = raw
   end
   return index, name
+end
+
+local function track_clear_color_code(params)
+  params = params or {}
+  local lua_code = ""
+  if targets_all(params) then
+    lua_code = "local count = 0\n"
+    lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
+    lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
+    lua_code = lua_code .. "  if t then\n"
+    lua_code = lua_code .. "    reaper.SetMediaTrackInfo_Value(t, 'I_CUSTOMCOLOR', 0)\n"
+    lua_code = lua_code .. "    count = count + 1\n"
+    lua_code = lua_code .. "  end\n"
+    lua_code = lua_code .. "end\n"
+    lua_code = lua_code .. "reaper.TrackList_AdjustWindows(false)\n"
+    lua_code = lua_code .. "reaper.UpdateArrange()\n"
+    lua_code = lua_code .. "return 'Cleared custom color on ' .. count .. ' track(s)'"
+    return lua_code
+  elseif boolish(params.selected) then
+    lua_code = "local count = 0\n"
+    lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
+    lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
+    lua_code = lua_code .. "  if t and reaper.IsTrackSelected(t) then\n"
+    lua_code = lua_code .. "    reaper.SetMediaTrackInfo_Value(t, 'I_CUSTOMCOLOR', 0)\n"
+    lua_code = lua_code .. "    count = count + 1\n"
+    lua_code = lua_code .. "  end\n"
+    lua_code = lua_code .. "end\n"
+    lua_code = lua_code .. "reaper.TrackList_AdjustWindows(false)\n"
+    lua_code = lua_code .. "reaper.UpdateArrange()\n"
+    lua_code = lua_code .. "return 'Cleared custom color on ' .. count .. ' selected track(s)'"
+    return lua_code
+  end
+
+  local track_index, track_name = track_target_index_name(params, true)
+  lua_code = track_lookup_code(track_index, track_name)
+  lua_code = lua_code .. "if t then\n"
+  lua_code = lua_code .. "  reaper.SetMediaTrackInfo_Value(t, 'I_CUSTOMCOLOR', 0)\n"
+  lua_code = lua_code .. "  reaper.TrackList_AdjustWindows(false)\n"
+  lua_code = lua_code .. "  reaper.UpdateArrange()\n"
+  lua_code = lua_code .. "  return 'Cleared custom color on track ' .. track_label\n"
+  lua_code = lua_code .. "else\n"
+  lua_code = lua_code .. "  return 'Track not found: ' .. track_label\n"
+  lua_code = lua_code .. "end"
+  return lua_code
 end
 
 local function env_value(raw, lane, default)
@@ -439,6 +502,7 @@ function McpFallback.create()
       ["track/set_volume"] = true,
       ["track/set_pan"] = true,
       ["track/set_color"] = true,
+      ["track/clear_color"] = true,
       ["track/mute"] = true,
       ["track/solo"] = true,
       ["item/fade"] = true,
@@ -527,7 +591,19 @@ function McpFallback.create()
         lua_code = lua_code .. "return '已删除 ' .. count .. ' 个选中轨道'"
       else
         local keyword = params.match or params.contains or params.keyword or params.name or ""
-        if keyword ~= "" then
+        if targets_all(params) then
+          lua_code = "local deleted = {}\n"
+          lua_code = lua_code .. "for i = reaper.CountTracks(0) - 1, 0, -1 do\n"
+          lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
+          lua_code = lua_code .. "  if t then\n"
+          lua_code = lua_code .. "    local _, n = reaper.GetTrackName(t)\n"
+          lua_code = lua_code .. "    table.insert(deleted, 1, n ~= '' and n or ('Track ' .. tostring(i + 1)))\n"
+          lua_code = lua_code .. "    reaper.DeleteTrack(t)\n"
+          lua_code = lua_code .. "  end\n"
+          lua_code = lua_code .. "end\n"
+          lua_code = lua_code .. "reaper.UpdateArrange()\n"
+          lua_code = lua_code .. "return 'Deleted ' .. #deleted .. ' track(s): ' .. table.concat(deleted, ', ')"
+        elseif keyword ~= "" then
           lua_code = "local keyword = " .. lua_quote(keyword) .. "\n"
           lua_code = lua_code .. "local exact = {}\n"
           lua_code = lua_code .. "local partial = {}\n"
@@ -590,7 +666,16 @@ function McpFallback.create()
     elseif endpoint == "track/set_volume" then
       local vol_db = params.volume or "0"
       local vol_lin = 10 ^ (tonumber(vol_db:gsub("dB", "")) / 20)
-      if params.selected == "true" then
+      if targets_all(params) then
+        lua_code = "local vol = " .. tostring(vol_lin) .. "\n"
+        lua_code = lua_code .. "local count = 0\n"
+        lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
+        lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
+        lua_code = lua_code .. "  if t then reaper.SetMediaTrackInfo_Value(t, 'D_VOL', vol); count = count + 1 end\n"
+        lua_code = lua_code .. "end\n"
+        lua_code = lua_code .. "reaper.UpdateArrange()\n"
+        lua_code = lua_code .. "return 'Set ' .. count .. ' track(s) volume to " .. vol_db .. "'"
+      elseif params.selected == "true" then
         lua_code = "local vol = " .. tostring(vol_lin) .. "\n"
         lua_code = lua_code .. "local count = 0\n"
         lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
@@ -615,7 +700,16 @@ function McpFallback.create()
 
     elseif endpoint == "track/set_pan" then
       local pan = tonumber(params.pan) or 0
-      if params.selected == "true" then
+      if targets_all(params) then
+        lua_code = "local pan = " .. tostring(pan) .. "\n"
+        lua_code = lua_code .. "local count = 0\n"
+        lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
+        lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
+        lua_code = lua_code .. "  if t then reaper.SetMediaTrackInfo_Value(t, 'D_PAN', pan); count = count + 1 end\n"
+        lua_code = lua_code .. "end\n"
+        lua_code = lua_code .. "reaper.UpdateArrange()\n"
+        lua_code = lua_code .. "return 'Set ' .. count .. ' track(s) pan to " .. tostring(pan) .. "'"
+      elseif params.selected == "true" then
         lua_code = "local pan = " .. tostring(pan) .. "\n"
         lua_code = lua_code .. "local count = 0\n"
         lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
@@ -638,12 +732,32 @@ function McpFallback.create()
       end
       desc = "track/set_pan (本地fallback)"
 
+    elseif endpoint == "track/clear_color" then
+      lua_code = track_clear_color_code(params)
+      desc = "track/clear_color (local fallback)"
+
     elseif endpoint == "track/set_color" then
       local color_raw = params.color or params.value or params.rgb or "red"
       local r, g, b, label = color_to_rgb(color_raw)
+      local color_key = tostring(color_raw or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+      local clear_color = color_key == "default" or color_key == "clear" or color_key == "none" or color_key == "reset" or color_key == "native" or color_key == "0" or color_key == "默认" or color_key == "默认色" or color_key == "清除" or color_key == "清空" or color_key == "恢复默认"
+      if clear_color then
+        lua_code = track_clear_color_code(params)
+        desc = "track/set_color default -> track/clear_color (local fallback)"
+      else
+      if clear_color then label = "default" end
       local label_q = lua_quote(label)
-      local color_expr = "reaper.ColorToNative(" .. r .. ", " .. g .. ", " .. b .. ") + 16777216"
-      if params.selected == "true" then
+      local color_expr = clear_color and "0" or ("reaper.ColorToNative(" .. r .. ", " .. g .. ", " .. b .. ") + 16777216")
+      if targets_all(params) then
+        lua_code = "local color = " .. color_expr .. "\n"
+        lua_code = lua_code .. "local count = 0\n"
+        lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
+        lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
+        lua_code = lua_code .. "  if t then reaper.SetTrackColor(t, color); count = count + 1 end\n"
+        lua_code = lua_code .. "end\n"
+        lua_code = lua_code .. "reaper.UpdateArrange()\n"
+        lua_code = lua_code .. "return 'Set ' .. count .. ' track(s) color to ' .. " .. label_q
+      elseif params.selected == "true" then
         lua_code = "local color = " .. color_expr .. "\n"
         lua_code = lua_code .. "local count = 0\n"
         lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
@@ -677,9 +791,20 @@ function McpFallback.create()
       end
       desc = "track/set_color (本地fallback)"
 
+      end
+
     elseif endpoint == "track/mute" then
       local mute_val = (params.mute == "true" or params.mute == "1") and "1" or "0"
-      if params.selected == "true" then
+      if targets_all(params) then
+        lua_code = "local mute = " .. mute_val .. "\n"
+        lua_code = lua_code .. "local count = 0\n"
+        lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
+        lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
+        lua_code = lua_code .. "  if t then reaper.SetMediaTrackInfo_Value(t, 'B_MUTE', mute); count = count + 1 end\n"
+        lua_code = lua_code .. "end\n"
+        lua_code = lua_code .. "reaper.UpdateArrange()\n"
+        lua_code = lua_code .. "return 'Updated mute on ' .. count .. ' track(s)'"
+      elseif params.selected == "true" then
         lua_code = "local mute = " .. mute_val .. "\n"
         lua_code = lua_code .. "local count = 0\n"
         lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
@@ -704,7 +829,16 @@ function McpFallback.create()
 
     elseif endpoint == "track/solo" then
       local solo_val = (params.solo == "true" or params.solo == "1") and "1" or "0"
-      if params.selected == "true" then
+      if targets_all(params) then
+        lua_code = "local solo = " .. solo_val .. "\n"
+        lua_code = lua_code .. "local count = 0\n"
+        lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
+        lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
+        lua_code = lua_code .. "  if t then reaper.SetMediaTrackInfo_Value(t, 'I_SOLO', solo); count = count + 1 end\n"
+        lua_code = lua_code .. "end\n"
+        lua_code = lua_code .. "reaper.UpdateArrange()\n"
+        lua_code = lua_code .. "return 'Updated solo on ' .. count .. ' track(s)'"
+      elseif params.selected == "true" then
         lua_code = "local solo = " .. solo_val .. "\n"
         lua_code = lua_code .. "local count = 0\n"
         lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
@@ -978,13 +1112,42 @@ function McpFallback.create()
       desc = "region/delete (local fallback)"
 
     elseif endpoint == "marker/delete" then
-      local idx = tonumber(params.index or params.target or params.marker or "")
-      if not idx then
+      local idx = params.index or params.target or params.marker or params.id or ""
+      local ids = params.ids or ""
+      local range = params.range or ""
+      local start_id = params.start or params.from or ""
+      local end_id = params["end"] or params.to or ""
+      local name = params.name or params.match or ""
+      if targets_all(params) or all_token(params.markers) or ids ~= "" or range ~= "" or start_id ~= "" or end_id ~= "" or name ~= "" then
+        lua_code = "local raw_index = " .. lua_quote(idx) .. "\n"
+        lua_code = lua_code .. "local raw_ids = " .. lua_quote(ids) .. "\n"
+        lua_code = lua_code .. "local raw_range = " .. lua_quote(range) .. "\n"
+        lua_code = lua_code .. "local raw_start = " .. lua_quote(start_id) .. "\n"
+        lua_code = lua_code .. "local raw_end = " .. lua_quote(end_id) .. "\n"
+        lua_code = lua_code .. "local raw_name = " .. lua_quote(name) .. "\n"
+        lua_code = lua_code .. "local delete_all = " .. tostring(targets_all(params) or all_token(params.markers)) .. "\n"
+        lua_code = lua_code .. "local wanted = {}\n"
+        lua_code = lua_code .. "local function trim(s) return tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', '') end\n"
+        lua_code = lua_code .. "local function add_id(n) n = tonumber(n); if n then wanted[math.floor(n)] = true end end\n"
+        lua_code = lua_code .. "local function add_range(a,b) a=tonumber(a); b=tonumber(b); if not a or not b then return end; local lo=math.min(math.floor(a),math.floor(b)); local hi=math.max(math.floor(a),math.floor(b)); for id=lo,hi do wanted[id]=true end end\n"
+        lua_code = lua_code .. "local function parse_ids(s) s=trim(s):gsub('^[Mm]arker%s*',''):gsub('[Mm]',''); local a,b=s:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if a and b then add_range(a,b); return end; for part in s:gmatch('[^,%s;|]+') do local x,y=part:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if x and y then add_range(x,y) else add_id(part) end end end\n"
+        lua_code = lua_code .. "if raw_index ~= '' then parse_ids(raw_index) end\n"
+        lua_code = lua_code .. "if raw_ids ~= '' then parse_ids(raw_ids) end\n"
+        lua_code = lua_code .. "if raw_range ~= '' then parse_ids(raw_range) end\n"
+        lua_code = lua_code .. "if raw_start ~= '' or raw_end ~= '' then add_range(raw_start, raw_end) end\n"
+        lua_code = lua_code .. "local has_wanted=false; for _ in pairs(wanted) do has_wanted=true; break end\n"
+        lua_code = lua_code .. "local name_filter=trim(raw_name); if not delete_all and not has_wanted and name_filter=='' then return 'ERROR: marker/delete requires index, ids, range, name/match, or all=true' end\n"
+        lua_code = lua_code .. "local total=reaper.CountProjectMarkers(0); local targets={}; local needle=name_filter:lower()\n"
+        lua_code = lua_code .. "for i=0,total-1 do local retval,isrgn,pos,rgnend,mname,markrgnindex=reaper.EnumProjectMarkers3(0,i); if retval ~= 0 and not isrgn then local id=tonumber(markrgnindex); local by_id=id and wanted[id]; local by_name=name_filter ~= '' and tostring(mname or ''):lower():find(needle,1,true) ~= nil; if delete_all or by_id or by_name then table.insert(targets,{id=id,name=mname or ''}) end end end\n"
+        lua_code = lua_code .. "table.sort(targets,function(a,b) return (a.id or 0) > (b.id or 0) end)\n"
+        lua_code = lua_code .. "local deleted=0; local labels={}; for _,marker in ipairs(targets) do if marker.id and reaper.DeleteProjectMarker(0, marker.id, false) then deleted=deleted+1; if #labels < 8 then table.insert(labels,'M'..tostring(marker.id)) end end end\n"
+        lua_code = lua_code .. "reaper.UpdateTimeline(); reaper.UpdateArrange(); if deleted == 0 then return 'ERROR: No matching Marker found' end; return 'Deleted ' .. deleted .. ' Marker(s): ' .. table.concat(labels, ', ')"
+      elseif tonumber(idx) == nil then
         lua_code = "return '✗ marker/delete 需要明确 index，不能默认删除 #0'"
       else
-        lua_code = "reaper.DeleteProjectMarker(0, " .. idx .. ", false)\n"
+        lua_code = "reaper.DeleteProjectMarker(0, " .. tostring(idx) .. ", false)\n"
         lua_code = lua_code .. "reaper.UpdateTimeline()\n"
-        lua_code = lua_code .. "return '已删除标记 #" .. idx .. "'"
+        lua_code = lua_code .. "return '已删除标记 #" .. tostring(idx) .. "'"
       end
       desc = "marker/delete (本地fallback)"
 
