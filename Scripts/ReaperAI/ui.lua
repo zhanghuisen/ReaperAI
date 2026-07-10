@@ -1306,9 +1306,8 @@ function UI.render(ctx)
       UI.render_chat(ctx)
     end
 
+    reaper.ImGui_End(state.ctx)
   end
-
-  reaper.ImGui_End(state.ctx)
 
   return open
 end
