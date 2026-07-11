@@ -44,12 +44,74 @@ function RuntimeState.create()
     map[key] = (map[key] or 0) + 1
   end
 
+  local function close_enough(a, b)
+    return math.abs((tonumber(a) or 0) - (tonumber(b) or 0)) <= 0.001
+  end
+
+  local function ranges_overlap(a_start, a_end, b_start, b_end)
+    a_start = tonumber(a_start) or 0
+    a_end = tonumber(a_end) or 0
+    b_start = tonumber(b_start) or 0
+    b_end = tonumber(b_end) or 0
+    return a_end > b_start + 0.001 and a_start < b_end - 0.001
+  end
+
+  local function append_region_ref(list, snapshot, i)
+    table.insert(list, {
+      index = snapshot.region_indices[i],
+      name = snapshot.region_names[i] or "",
+      position = snapshot.region_positions[i] or 0,
+      ["end"] = snapshot.region_ends[i] or 0,
+    })
+  end
+
+  local function apply_region_selection_candidates(snapshot)
+    if not snapshot or not snapshot.time_selection_active then return end
+
+    local exact = {}
+    local contained = {}
+    local overlap = {}
+    for i = 1, #(snapshot.region_indices or {}) do
+      local pos = snapshot.region_positions[i] or 0
+      local rgnend = snapshot.region_ends[i] or 0
+      if close_enough(pos, snapshot.time_selection_start) and close_enough(rgnend, snapshot.time_selection_end) then
+        append_region_ref(exact, snapshot, i)
+      elseif pos >= (snapshot.time_selection_start or 0) - 0.001 and rgnend <= (snapshot.time_selection_end or 0) + 0.001 then
+        append_region_ref(contained, snapshot, i)
+      elseif ranges_overlap(pos, rgnend, snapshot.time_selection_start, snapshot.time_selection_end) then
+        append_region_ref(overlap, snapshot, i)
+      end
+    end
+
+    local selected = exact
+    local source = "time_selection_exact"
+    if #selected == 0 then
+      selected = contained
+      source = "time_selection_contained"
+    end
+    if #selected == 0 then
+      selected = overlap
+      source = "time_selection_overlap"
+    end
+
+    snapshot.selected_region_source = #selected > 0 and source or ""
+    snapshot.selected_region_count = #selected
+    for _, region in ipairs(selected) do
+      table.insert(snapshot.selected_region_indices, region.index)
+      table.insert(snapshot.selected_region_names, region.name)
+      table.insert(snapshot.selected_region_positions, region.position)
+      table.insert(snapshot.selected_region_ends, region["end"])
+    end
+  end
+
   local function capture_project_snapshot()
     local snapshot = {
       track_count = 0,
       track_names = {},
       track_guids = {},
       track_name_counts = {},
+      selected_track_indices = {},
+      selected_track_names = {},
       track_fx_total = 0,
       track_fx_counts = {},
       track_fx_names = {},
@@ -63,18 +125,83 @@ function RuntimeState.create()
       item_name_counts = {},
       selected_track_count = 0,
       selected_item_count = 0,
+      selected_item_indices = {},
+      selected_item_names = {},
+      selected_item_positions = {},
+      selected_item_lengths = {},
+      current_item_indices = {},
+      current_item_names = {},
+      time_selection_item_indices = {},
+      time_selection_item_names = {},
       marker_count = 0,
       marker_indices = {},
       marker_names = {},
       marker_positions = {},
       marker_name_counts = {},
+      current_marker_indices = {},
+      current_marker_names = {},
+      time_selection_marker_indices = {},
+      time_selection_marker_names = {},
       region_count = 0,
       region_indices = {},
       region_names = {},
       region_positions = {},
       region_ends = {},
       region_name_counts = {},
+      current_region_indices = {},
+      current_region_names = {},
+      time_selection_region_indices = {},
+      time_selection_region_names = {},
+      selected_region_count = 0,
+      selected_region_indices = {},
+      selected_region_names = {},
+      selected_region_positions = {},
+      selected_region_ends = {},
+      selected_region_source = "",
+      cursor_position = 0,
+      play_state = 0,
+      time_selection_start = 0,
+      time_selection_end = 0,
+      time_selection_length = 0,
+      time_selection_active = false,
+      loop_start = 0,
+      loop_end = 0,
+      loop_length = 0,
+      loop_active = false,
+      selected_envelope = false,
     }
+
+    if reaper.GetCursorPosition then
+      local ok, value = pcall(reaper.GetCursorPosition)
+      if ok then snapshot.cursor_position = tonumber(value) or 0 end
+    end
+
+    if reaper.GetPlayState then
+      local ok, value = pcall(reaper.GetPlayState)
+      if ok then snapshot.play_state = tonumber(value) or 0 end
+    end
+
+    if reaper.GetSet_LoopTimeRange then
+      local ok, start_pos, end_pos = pcall(reaper.GetSet_LoopTimeRange, false, false, 0, 0, false)
+      if ok then
+        snapshot.time_selection_start = tonumber(start_pos) or 0
+        snapshot.time_selection_end = tonumber(end_pos) or 0
+        snapshot.time_selection_length = math.max(0, snapshot.time_selection_end - snapshot.time_selection_start)
+        snapshot.time_selection_active = snapshot.time_selection_length > 0.001
+      end
+      local loop_ok, loop_start, loop_end = pcall(reaper.GetSet_LoopTimeRange, false, true, 0, 0, false)
+      if loop_ok then
+        snapshot.loop_start = tonumber(loop_start) or 0
+        snapshot.loop_end = tonumber(loop_end) or 0
+        snapshot.loop_length = math.max(0, snapshot.loop_end - snapshot.loop_start)
+        snapshot.loop_active = snapshot.loop_length > 0.001
+      end
+    end
+
+    if reaper.GetSelectedEnvelope then
+      local ok, env = pcall(reaper.GetSelectedEnvelope, 0)
+      snapshot.selected_envelope = ok and env ~= nil
+    end
 
     if reaper.CountTracks then
       local ok, count = pcall(reaper.CountTracks, 0)
@@ -86,6 +213,10 @@ function RuntimeState.create()
           local track = reaper.GetTrack and reaper.GetTrack(0, i) or nil
           if reaper.GetTrackGUID then
             snapshot.track_guids[i + 1] = track and reaper.GetTrackGUID(track) or ""
+          end
+          if track and reaper.IsTrackSelected and reaper.IsTrackSelected(track) then
+            table.insert(snapshot.selected_track_indices, i)
+            table.insert(snapshot.selected_track_names, name)
           end
           increment_count(snapshot.track_name_counts, name)
           local fx_count = track_fx_count_at(i)
@@ -107,6 +238,8 @@ function RuntimeState.create()
       if ok and count then
         snapshot.selected_track_count = tonumber(count) or 0
       end
+    else
+      snapshot.selected_track_count = #snapshot.selected_track_indices
     end
 
     if reaper.CountMediaItems then
@@ -122,6 +255,22 @@ function RuntimeState.create()
             if item and reaper.GetMediaItemInfo_Value then
               snapshot.item_positions[i + 1] = reaper.GetMediaItemInfo_Value(item, "D_POSITION") or 0
               snapshot.item_lengths[i + 1] = reaper.GetMediaItemInfo_Value(item, "D_LENGTH") or 0
+            end
+            if item and reaper.IsMediaItemSelected and reaper.IsMediaItemSelected(item) then
+              table.insert(snapshot.selected_item_indices, i)
+              table.insert(snapshot.selected_item_names, item_name)
+              table.insert(snapshot.selected_item_positions, snapshot.item_positions[i + 1] or 0)
+              table.insert(snapshot.selected_item_lengths, snapshot.item_lengths[i + 1] or 0)
+            end
+            local item_pos = snapshot.item_positions[i + 1] or 0
+            local item_len = snapshot.item_lengths[i + 1] or 0
+            if item and snapshot.cursor_position >= item_pos - 0.001 and snapshot.cursor_position <= item_pos + item_len + 0.001 then
+              table.insert(snapshot.current_item_indices, i)
+              table.insert(snapshot.current_item_names, item_name)
+            end
+            if item and snapshot.time_selection_active and ranges_overlap(item_pos, item_pos + item_len, snapshot.time_selection_start, snapshot.time_selection_end) then
+              table.insert(snapshot.time_selection_item_indices, i)
+              table.insert(snapshot.time_selection_item_names, item_name)
             end
             if item and reaper.GetMediaItemTrack then
               local track = reaper.GetMediaItemTrack(item)
@@ -152,11 +301,27 @@ function RuntimeState.create()
               table.insert(snapshot.region_names, name or "")
               table.insert(snapshot.region_positions, pos or 0)
               table.insert(snapshot.region_ends, rgnend or 0)
+              if snapshot.cursor_position >= (pos or 0) - 0.001 and snapshot.cursor_position <= (rgnend or 0) + 0.001 then
+                table.insert(snapshot.current_region_indices, markrgnindex)
+                table.insert(snapshot.current_region_names, name or "")
+              end
+              if snapshot.time_selection_active and ranges_overlap(pos or 0, rgnend or 0, snapshot.time_selection_start, snapshot.time_selection_end) then
+                table.insert(snapshot.time_selection_region_indices, markrgnindex)
+                table.insert(snapshot.time_selection_region_names, name or "")
+              end
               increment_count(snapshot.region_name_counts, name or "")
             else
               table.insert(snapshot.marker_indices, markrgnindex)
               table.insert(snapshot.marker_names, name or "")
               table.insert(snapshot.marker_positions, pos or 0)
+              if close_enough(pos or 0, snapshot.cursor_position) then
+                table.insert(snapshot.current_marker_indices, markrgnindex)
+                table.insert(snapshot.current_marker_names, name or "")
+              end
+              if snapshot.time_selection_active and (pos or 0) >= snapshot.time_selection_start - 0.001 and (pos or 0) <= snapshot.time_selection_end + 0.001 then
+                table.insert(snapshot.time_selection_marker_indices, markrgnindex)
+                table.insert(snapshot.time_selection_marker_names, name or "")
+              end
               increment_count(snapshot.marker_name_counts, name or "")
             end
           end
@@ -164,11 +329,15 @@ function RuntimeState.create()
       end
     end
 
+    apply_region_selection_candidates(snapshot)
+
     if reaper.CountSelectedMediaItems then
       local ok, count = pcall(reaper.CountSelectedMediaItems, 0)
       if ok and count then
         snapshot.selected_item_count = tonumber(count) or 0
       end
+    else
+      snapshot.selected_item_count = #snapshot.selected_item_indices
     end
 
     return snapshot
@@ -729,6 +898,7 @@ function ObjectBinding.create(deps)
   }
 
   local ITEM_BIND_ENDPOINTS = {
+    ["item/set_color"] = true,
     ["item/fade"] = true,
     ["item/set_fade"] = true,
     ["item/fade_shape"] = true,
@@ -1053,6 +1223,13 @@ function ObjectBinding.create(deps)
     local endpoint, params = Operation.parse_call(step.call or "")
     if not ITEM_BIND_ENDPOINTS[endpoint] then return nil end
     if param_has_value(params, "name") or param_has_value(params, "match") or param_has_value(params, "item_name") then
+      return nil
+    end
+    local scope = tostring(params.scope or params.selector or params.target_scope or ""):lower():gsub("%s+", "_")
+    if param_is_truthy(params.all) or param_is_truthy(params.all_items) or param_is_truthy(params.time_selection) or param_is_truthy(params.current) then
+      return nil
+    end
+    if scope == "all" or scope == "time_selection" or scope == "time-selection" or scope == "current" or scope == "cursor" then
       return nil
     end
     local item_value = params.item or params.target or params.index

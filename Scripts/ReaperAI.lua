@@ -1,11 +1,11 @@
 --[[
-  ReaperAI v1.0.4 - 智能助手
+  ReaperAI v1.0.5 - 智能助手
   
   作者：zhanghuisen
   
   前置要求：ReaImGui（通过 ReaPack 安装）
   
-  版本：1.0.4 (2026-07-11)
+  版本：1.0.5 (2026-07-11)
   核心特性：
   - 异步 HTTP：使用后台 worker，不阻塞 REAPER UI
   - 智能助手：支持咨询与操作双模式
@@ -178,7 +178,15 @@ local CONFIG = {
   llm_url       = "https://api.openai.com/v1/chat/completions",
   llm_key       = "",
   llm_model     = "gpt-5.5",
+  audio_provider = "elevenlabs",
   elevenlabs_key = "",
+  doubao_api_key = "",
+  doubao_speaker = "",
+  doubao_language = "zh_mix",
+  doubao_accent = "default",
+  doubao_speed_ratio = 1.0,
+  doubao_pitch_ratio = 1.0,
+  doubao_volume_ratio = 1.0,
   mcp_url       = "http://127.0.0.1:8765",
   mcp_enabled   = true,
   inject_context = true,
@@ -202,10 +210,12 @@ local state = {
   show_settings  = false,
   show_audio     = false,
   audio_mode     = "sfx",
+  audio_provider_config_open = false,
   audio_waiting  = false,
   audio_pending_count = 0,
   audio_status   = "就绪",
   audio_wait_kind = "",
+  audio_wait_provider_label = "",
   audio_started_at = 0,
   chat_stream_active = false,
   stream_typewriter_update = nil,
@@ -220,6 +230,18 @@ local state = {
   audio_vox_voice_refresh_message = "",
   audio_vox_performance = "",
   audio_vox_text = "",
+  audio_doubao_speaker = "",
+  audio_doubao_language = "zh_mix",
+  audio_doubao_accent = "default",
+  audio_doubao_voice_id = "",
+  audio_doubao_voice_filter = "",
+  audio_doubao_dynamic_voices = {},
+  audio_doubao_voices_refreshing = false,
+  audio_doubao_voice_refresh_message = "",
+  audio_doubao_speed_ratio = 1.0,
+  audio_doubao_pitch_ratio = 1.0,
+  audio_doubao_volume_ratio = 1.0,
+  audio_doubao_advanced_open = false,
   local_capability_status = nil,
   capability_probe_running = false,
   capability_probe_last_message = "",
@@ -230,6 +252,7 @@ local state = {
   exec_mode      = false,
   show_llm_key   = false,
   show_elevenlabs_key = false,
+  show_doubao_key = false,
   llm_provider_id = "openai",
   llm_model_filter = "",
   llm_model_menu_filter = "",
@@ -349,6 +372,7 @@ local function reset_conversation_state(reason, opts)
   state.audio_pending_count = 0
   state.audio_status = "就绪"
   state.audio_wait_kind = ""
+  state.audio_wait_provider_label = ""
   state.audio_started_at = 0
   state.chat_stream_active = false
   state.stream_typewriter_update = nil
@@ -680,7 +704,7 @@ local function current_project_file_path()
   return ""
 end
 
-local function elevenlabs_output_dir()
+local function audio_output_dir()
   local project_file = current_project_file_path()
   local project_dir = path_dirname(project_file)
   if project_dir ~= "" then
@@ -696,8 +720,56 @@ local function config_one_line(value)
   return value
 end
 
+local function normalize_audio_provider(provider)
+  if ElevenLabs and type(ElevenLabs.normalize_provider) == "function" then
+    return ElevenLabs.normalize_provider(provider)
+  end
+  provider = tostring(provider or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if provider == "doubao" or provider == "volcengine" or provider == "volc" then
+    return "doubao"
+  end
+  return "elevenlabs"
+end
+
+local function audio_provider_label(provider)
+  if ElevenLabs and type(ElevenLabs.provider_label) == "function" then
+    return ElevenLabs.provider_label(provider)
+  end
+  return normalize_audio_provider(provider) == "doubao" and "火山引擎豆包" or "ElevenLabs"
+end
+
 local LlmSettings = {}
 local ElevenVoiceSettings = {}
+local DoubaoVoiceSettings = {}
+
+local function audio_voice_cache_file(provider)
+  provider = normalize_audio_provider(provider)
+  return path_join((reaper and reaper.GetResourcePath and reaper.GetResourcePath()) or "", "ReaperAI_" .. provider .. "_voices.tsv")
+end
+
+local function read_audio_voice_cache(provider)
+  local path = audio_voice_cache_file(provider)
+  local f = io.open(path, "r")
+  if not f then return nil, path end
+  local content = f:read("*a") or ""
+  f:close()
+  return content, path
+end
+
+local function write_audio_voice_cache(provider, content)
+  content = tostring(content or "")
+  if content == "" then return false, "缓存内容为空" end
+  local path = audio_voice_cache_file(provider)
+  local f = io.open(path, "w")
+  if not f then return false, "无法写入声线缓存: " .. tostring(path) end
+  f:write("# ReaperAI audio voice cache\n")
+  f:write("# provider=" .. normalize_audio_provider(provider) .. "\n")
+  f:write("# generated_at=" .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
+  f:write(content)
+  if not content:match("[\r\n]$") then f:write("\n") end
+  f:close()
+  return true, path
+end
 
 function LlmSettings.split_config_list(value)
   local items = {}
@@ -762,10 +834,10 @@ local function save_config()
   end
 
   f:write(table.concat({
-    "# ReaperAI v1.0.4 配置文件",
+    "# ReaperAI v1.0.5 配置文件",
     "# 格式: KEY=VALUE",
     "# 现在推荐在 ReaperAI 设置面板中编辑，文件仅作为本地存储。",
-    "# 支持配置项: LLM_PROVIDER, LLM_API_KEY, LLM_API_URL, LLM_MODEL, LLM_RECENT_MODELS, ELEVENLABS_API_KEY",
+    "# 支持配置项: LLM_PROVIDER, LLM_API_KEY, LLM_API_URL, LLM_MODEL, LLM_RECENT_MODELS, AUDIO_PROVIDER, ELEVENLABS_API_KEY, DOUBAO_API_KEY, DOUBAO_SPEAKER",
     "",
     "LLM_API_URL=" .. config_one_line(CONFIG.llm_url),
     "LLM_API_KEY=" .. config_one_line(CONFIG.llm_key),
@@ -773,9 +845,16 @@ local function save_config()
     "LLM_PROVIDER=" .. config_one_line(state.llm_provider_id),
     "LLM_RECENT_MODELS=" .. LlmSettings.encode_recent_models(),
     "",
-    "# ElevenLabs 语音/音效生成 (可选)",
-    "# 推荐使用生成音频页；快捷方式: 11vox 语气说 台词 / 11sfx 音效描述",
+    "# 音频生成配置（建议在生成音频页编辑）",
+    "AUDIO_PROVIDER=" .. config_one_line(normalize_audio_provider(CONFIG.audio_provider)),
     "ELEVENLABS_API_KEY=" .. config_one_line(CONFIG.elevenlabs_key),
+    "DOUBAO_API_KEY=" .. config_one_line(CONFIG.doubao_api_key),
+    "DOUBAO_SPEAKER=" .. config_one_line(CONFIG.doubao_speaker),
+    "DOUBAO_LANGUAGE=" .. config_one_line(CONFIG.doubao_language),
+    "DOUBAO_ACCENT=" .. config_one_line(CONFIG.doubao_accent),
+    "DOUBAO_SPEED_RATIO=" .. config_one_line(CONFIG.doubao_speed_ratio),
+    "DOUBAO_PITCH_RATIO=" .. config_one_line(CONFIG.doubao_pitch_ratio),
+    "DOUBAO_VOLUME_RATIO=" .. config_one_line(CONFIG.doubao_volume_ratio),
     "",
   }, "\n"))
   f:close()
@@ -803,6 +882,14 @@ local function load_config()
     CONFIG.llm_key   = lines[2] or CONFIG.llm_key
     CONFIG.llm_model = lines[3] or CONFIG.llm_model
     CONFIG.elevenlabs_key = ""
+    CONFIG.doubao_api_key = ""
+    CONFIG.doubao_speaker = ""
+    CONFIG.doubao_language = "zh_mix"
+    CONFIG.doubao_accent = "default"
+    CONFIG.doubao_speed_ratio = 1.0
+    CONFIG.doubao_pitch_ratio = 1.0
+    CONFIG.doubao_volume_ratio = 1.0
+    CONFIG.audio_provider = "elevenlabs"
     
     -- 自动迁移到新版键值对格式
     save_config()
@@ -821,13 +908,42 @@ local function load_config()
           state.llm_provider_id = value
         elseif key == "LLM_RECENT_MODELS" then
           LlmSettings.decode_recent_models(value)
+        elseif key == "AUDIO_PROVIDER" then
+          CONFIG.audio_provider = normalize_audio_provider(value)
         elseif key == "ELEVENLABS_API_KEY" then
           CONFIG.elevenlabs_key = value
+        elseif key == "DOUBAO_API_KEY" then
+          CONFIG.doubao_api_key = value
+        elseif key == "DOUBAO_SPEAKER" then
+          CONFIG.doubao_speaker = value
+        elseif key == "DOUBAO_LANGUAGE" then
+          CONFIG.doubao_language = value
+        elseif key == "DOUBAO_ACCENT" then
+          CONFIG.doubao_accent = value
+        elseif key == "DOUBAO_SPEED_RATIO" then
+          CONFIG.doubao_speed_ratio = tonumber(value) or 1.0
+        elseif key == "DOUBAO_PITCH_RATIO" then
+          CONFIG.doubao_pitch_ratio = tonumber(value) or 1.0
+        elseif key == "DOUBAO_VOLUME_RATIO" then
+          CONFIG.doubao_volume_ratio = tonumber(value) or 1.0
         -- v1.0+ ELEVENLABS_VOICE_ID 已移除，Voice 由 worker 智能选择
         end
       end
     end
   end
+  CONFIG.audio_provider = normalize_audio_provider(CONFIG.audio_provider)
+  CONFIG.doubao_language = (ElevenLabs.normalize_doubao_language and ElevenLabs.normalize_doubao_language(CONFIG.doubao_language)) or "zh_mix"
+  CONFIG.doubao_accent = (ElevenLabs.normalize_doubao_accent and ElevenLabs.normalize_doubao_accent(CONFIG.doubao_language, CONFIG.doubao_accent)) or "default"
+  CONFIG.doubao_speed_ratio = tonumber(CONFIG.doubao_speed_ratio) or 1.0
+  CONFIG.doubao_pitch_ratio = tonumber(CONFIG.doubao_pitch_ratio) or 1.0
+  CONFIG.doubao_volume_ratio = tonumber(CONFIG.doubao_volume_ratio) or 1.0
+  state.audio_doubao_speaker = CONFIG.doubao_speaker or ""
+  state.audio_doubao_voice_id = CONFIG.doubao_speaker or ""
+  state.audio_doubao_language = CONFIG.doubao_language
+  state.audio_doubao_accent = CONFIG.doubao_accent
+  state.audio_doubao_speed_ratio = CONFIG.doubao_speed_ratio
+  state.audio_doubao_pitch_ratio = CONFIG.doubao_pitch_ratio
+  state.audio_doubao_volume_ratio = CONFIG.doubao_volume_ratio
   sync_llm_provider_from_config()
   LlmSettings.remember_model(CONFIG.llm_model, state.llm_provider_id)
 end
@@ -956,7 +1072,19 @@ function ElevenVoiceSettings.parse_worker_response(response)
   return voices, {
     message = json_string_field(response, "message") or "",
     fallback = json_bool_field(response, "fallback") == true,
+    content = content,
   }
+end
+
+function ElevenVoiceSettings.load_cache()
+  if not (ElevenLabs and type(ElevenLabs.parse_voice_lines) == "function") then return false end
+  local content = read_audio_voice_cache("elevenlabs")
+  if not content or content == "" then return false end
+  local voices = ElevenLabs.parse_voice_lines(content)
+  if #voices == 0 then return false end
+  state.audio_vox_dynamic_voices = voices
+  state.audio_vox_voice_refresh_message = "已加载上次检测的 " .. tostring(#voices) .. " 条 ElevenLabs 声线"
+  return true
 end
 
 function ElevenVoiceSettings.refresh_voices()
@@ -1008,6 +1136,9 @@ function ElevenVoiceSettings.refresh_voices()
 
     local message = "已检测到 " .. tostring(#voices) .. " 条可用声线"
     if meta and meta.message ~= "" then message = meta.message end
+    if meta and meta.content and meta.content ~= "" then
+      write_audio_voice_cache("elevenlabs", meta.content)
+    end
     state.audio_vox_voice_refresh_message = message
     state.status = state.audio_vox_voice_refresh_message
   end)
@@ -1022,6 +1153,114 @@ function ElevenVoiceSettings.refresh_voices()
   end
 
   return true, state.audio_vox_voice_refresh_message
+end
+
+function DoubaoVoiceSettings.parse_worker_response(response)
+  if not response or response == "" then
+    return nil, "空响应"
+  end
+  if tostring(response):match("^%[ERROR%]") then
+    return nil, tostring(response):gsub("^%[ERROR%]%s*", "")
+  end
+  if json_bool_field(response, "success") == false then
+    return nil, json_string_field(response, "error") or "刷新豆包音色失败"
+  end
+
+  local content = json_string_field(response, "content")
+  if not content or content == "" then
+    content = tostring(response or "")
+  end
+
+  if not (ElevenLabs and type(ElevenLabs.parse_doubao_voice_lines) == "function") then
+    return nil, "音频模块未更新，无法解析豆包音色"
+  end
+  local voices = ElevenLabs.parse_doubao_voice_lines(content)
+  if #voices == 0 then
+    return nil, "豆包音色响应中没有可用音色"
+  end
+  return voices, {
+    message = json_string_field(response, "message") or "",
+    content = content,
+  }
+end
+
+function DoubaoVoiceSettings.load_cache()
+  if not (ElevenLabs and type(ElevenLabs.parse_doubao_voice_lines) == "function") then return false end
+  local content = read_audio_voice_cache("doubao")
+  if not content or content == "" then return false end
+  local voices = ElevenLabs.parse_doubao_voice_lines(content)
+  if #voices == 0 then return false end
+  state.audio_doubao_dynamic_voices = voices
+  if tostring(CONFIG.doubao_speaker or "") == "" and voices[1] then
+    CONFIG.doubao_speaker = tostring(voices[1].id or "")
+    state.audio_doubao_speaker = CONFIG.doubao_speaker
+    state.audio_doubao_voice_id = CONFIG.doubao_speaker
+  end
+  state.audio_doubao_voice_refresh_message = "已加载上次检测的 " .. tostring(#voices) .. " 条豆包音色"
+  return true
+end
+
+function DoubaoVoiceSettings.refresh_voices()
+  local doubao_api_key = CONFIG.doubao_api_key or ""
+  if doubao_api_key == "" then
+    state.audio_doubao_voice_refresh_message = "请先填写豆包 API Key"
+    state.status = state.audio_doubao_voice_refresh_message
+    return false, state.audio_doubao_voice_refresh_message
+  end
+
+  if not AsyncPipe or type(AsyncPipe.fetch_doubao_voices) ~= "function" then
+    state.audio_doubao_dynamic_voices = {}
+    state.audio_doubao_voice_refresh_message = "异步模块未更新，无法检测豆包音色"
+    state.status = state.audio_doubao_voice_refresh_message
+    return false, state.audio_doubao_voice_refresh_message
+  end
+
+  state.audio_doubao_voices_refreshing = true
+  state.audio_doubao_voice_refresh_message = "正在刷新豆包可用音色"
+  state.status = state.audio_doubao_voice_refresh_message
+
+  local req_id, err = AsyncPipe.fetch_doubao_voices(doubao_api_key, function(response, error)
+    state.audio_doubao_voices_refreshing = false
+    if error then
+      state.audio_doubao_dynamic_voices = {}
+      state.audio_doubao_voice_refresh_message = "豆包音色检测失败: " .. tostring(error)
+      state.status = state.audio_doubao_voice_refresh_message
+      return
+    end
+
+    local voices, meta = DoubaoVoiceSettings.parse_worker_response(response)
+    if not voices then
+      state.audio_doubao_dynamic_voices = {}
+      state.audio_doubao_voice_refresh_message = "没有检测到可用豆包音色: " .. tostring(meta)
+      state.status = state.audio_doubao_voice_refresh_message
+      return
+    end
+
+    state.audio_doubao_dynamic_voices = voices
+    if tostring(CONFIG.doubao_speaker or "") == "" and voices[1] then
+      CONFIG.doubao_speaker = tostring(voices[1].id or "")
+      state.audio_doubao_speaker = CONFIG.doubao_speaker
+      state.audio_doubao_voice_id = CONFIG.doubao_speaker
+    end
+
+    local message = "已检测到 " .. tostring(#voices) .. " 条豆包音色"
+    if meta and meta.message ~= "" then message = meta.message end
+    if meta and meta.content and meta.content ~= "" then
+      write_audio_voice_cache("doubao", meta.content)
+    end
+    state.audio_doubao_voice_refresh_message = message
+    state.status = state.audio_doubao_voice_refresh_message
+  end)
+
+  if not req_id then
+    state.audio_doubao_voices_refreshing = false
+    state.audio_doubao_dynamic_voices = {}
+    state.audio_doubao_voice_refresh_message = "豆包音色检测启动失败: " .. tostring(err)
+    state.status = state.audio_doubao_voice_refresh_message
+    return false, state.audio_doubao_voice_refresh_message
+  end
+
+  return true, state.audio_doubao_voice_refresh_message
 end
 
 function LlmSettings.test_connection()
@@ -1104,7 +1343,7 @@ end
 local function init()
   if state.ctx then return true end
   if not reaper.ImGui_CreateContext then
-    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.4", 0)
+    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.5", 0)
     return false
   end
   state.ctx = reaper.ImGui_CreateContext("ReaperAI")
@@ -1801,40 +2040,68 @@ local function build_json(user_msg)
 end
 
 -- ============================================
--- 发送 ElevenLabs 音频生成请求 (v1.0 新增)
+-- 发送音频生成请求
 -- ============================================
--- 复用 AsyncPipe.send_request()，传入 mode="elevenlabs"
-local function send_elevenlabs_request(audio_input)
+local function send_audio_request(audio_input, forced_provider)
   if not AsyncPipe then
     state.status = "异步模块未加载，无法生成音频"
     set_audio_status(state.status)
     return false
   end
-  
-  local elevenlabs_key = CONFIG.elevenlabs_key or ""
-  
-  if elevenlabs_key == "" or elevenlabs_key == "在此填入 ElevenLabs API Key" then
-    state.status = "请先设置 ElevenLabs API Key"
+
+  local provider = normalize_audio_provider(forced_provider or (type(audio_input) == "table" and audio_input.provider) or CONFIG.audio_provider)
+  if type(audio_input) == "table" then
+    audio_input.provider = provider
+  end
+
+  local api_key = ""
+  local key_label = ""
+  if provider == "doubao" then
+    api_key = CONFIG.doubao_api_key or ""
+    key_label = "火山引擎豆包 API Key"
+  else
+    api_key = CONFIG.elevenlabs_key or ""
+    key_label = "ElevenLabs API Key"
+  end
+
+  if api_key == "" or api_key == "在此填入 ElevenLabs API Key" or api_key == "在此填入你的 API Key" then
+    state.status = "请先在生成音频页设置 " .. key_label
     set_audio_status(state.status)
-    state.show_settings = true
-    state.show_audio = false
+    state.show_settings = false
+    state.show_audio = true
     return false
   end
 
   local audio_req = ElevenLabs.normalize_request(audio_input)
-  if audio_req.mode == "vox" and ElevenLabs.trim_text(audio_req.spoken_text) == "" then
-    state.status = "请填写 VOX 台词"
+  audio_req.provider = provider
+
+  if provider == "doubao" and audio_req.mode == "vox" then
+    audio_req.language = (ElevenLabs.normalize_doubao_language and ElevenLabs.normalize_doubao_language(audio_req.language or CONFIG.doubao_language)) or (audio_req.language or CONFIG.doubao_language or "zh_mix")
+    audio_req.accent = (ElevenLabs.normalize_doubao_accent and ElevenLabs.normalize_doubao_accent(audio_req.language, audio_req.accent or CONFIG.doubao_accent)) or (audio_req.accent or CONFIG.doubao_accent or "default")
+    audio_req.speed_ratio = tonumber(audio_req.speed_ratio or CONFIG.doubao_speed_ratio) or 1.0
+    audio_req.pitch_ratio = tonumber(audio_req.pitch_ratio or CONFIG.doubao_pitch_ratio) or 1.0
+    audio_req.volume_ratio = tonumber(audio_req.volume_ratio or CONFIG.doubao_volume_ratio) or 1.0
+    audio_req.speaker = ElevenLabs.trim_text(audio_req.speaker or CONFIG.doubao_speaker or "")
+    if audio_req.speaker == "" then
+      state.status = "请先在服务商配置中刷新并选择豆包音色"
+      set_audio_status(state.status)
+      return false
+    end
+  end
+
+  if audio_req.mode == "vox" and ElevenLabs.trim_text(audio_req.spoken_text or audio_req.text_prompt) == "" then
+    state.status = "请填写语音合成台词"
     set_audio_status(state.status)
     return false
-  elseif audio_req.mode == "sfx" and ElevenLabs.trim_text(audio_req.prompt) == "" then
-    state.status = "请填写 SFX 描述"
+  elseif audio_req.mode == "sfx" and ElevenLabs.trim_text((provider == "doubao") and (audio_req.text_prompt or audio_req.prompt) or audio_req.prompt) == "" then
+    state.status = "请填写音频生成描述"
     set_audio_status(state.status)
     return false
   end
 
   -- Worker 会从 config_file() 读取 LLM 配置；这里确保 UI 中的配置已落盘。
   pcall(save_config)
-  audio_req.output_dir = elevenlabs_output_dir()
+  audio_req.output_dir = audio_output_dir()
   
   local payload = ElevenLabs.request_json(audio_req)
   table.insert(state.messages, {
@@ -1843,12 +2110,12 @@ local function send_elevenlabs_request(audio_input)
     is_system = true
   })
   
-  -- v1.0+ api_url 参数在 elevenlabs 模式下承载 config.txt 路径（worker 读取 LLM 配置和 voice_id）
+  -- v1.0+ api_url 参数在 audio 模式下承载 config.txt 路径（worker 读取 LLM 配置和 provider 配置）
   local request_epoch = current_conversation_epoch()
   local req_id, err = AsyncPipe.send_request(
     config_file(),  -- config.txt 路径，worker 用它解析 LLM 配置和 voice_id
-    elevenlabs_key,
-    "elevenlabs",  -- model 占位
+    api_key,
+    provider,  -- mode 传递 provider，worker 按 provider 分流
     payload,
     function(response, error)
       if not is_current_conversation_epoch(request_epoch) then return end
@@ -1867,7 +2134,7 @@ local function send_elevenlabs_request(audio_input)
           local wav_path, hint = ElevenLabs.parse_worker_response(response)
           
           -- 在 REAPER 中新建轨道并导入音频
-          local track_name = ElevenLabs.elevenlabs_track_name(audio_req.mode, audio_req.track_name, audio_req)
+          local track_name = ElevenLabs.audio_track_name(provider, audio_req.mode, audio_req.track_name, audio_req)
           
           -- 先验证文件存在
           local file_exists = false
@@ -1894,7 +2161,7 @@ local function send_elevenlabs_request(audio_input)
                 math = math,
                 table = table,
               }
-              local func, err = load(import_script, "elevenlabs_import", "t", import_env)
+              local func, err = load(import_script, "audio_import", "t", import_env)
               if func then
                 return func()
               else
@@ -1969,7 +2236,7 @@ local function send_elevenlabs_request(audio_input)
         end
       end
     end,
-    "elevenlabs"  -- v1.0+ 传入 mode 参数
+    "audio"  -- 统一音频 worker 模式，由 provider 字段决定细分
   )
   
   if not req_id then
@@ -1978,9 +2245,16 @@ local function send_elevenlabs_request(audio_input)
     return false
   end
   
-  Waiting.begin_audio_request(state, audio_req.mode)
+  Waiting.begin_audio_request(state, audio_req.mode, audio_provider_label(provider))
   state.scroll = true
   return true
+end
+
+local function send_elevenlabs_request(audio_input)
+  if type(audio_input) == "table" then
+    audio_input.provider = "elevenlabs"
+  end
+  return send_audio_request(audio_input, "elevenlabs")
 end
 
 -- ============================================
@@ -4512,6 +4786,7 @@ local function make_ui_context()
       remember_llm_model = LlmSettings.remember_model,
       refresh_llm_models = LlmSettings.refresh_models,
       refresh_elevenlabs_voices = ElevenVoiceSettings.refresh_voices,
+      refresh_doubao_voices = DoubaoVoiceSettings.refresh_voices,
       test_llm_connection = LlmSettings.test_connection,
       get_local_capability_status = get_local_capability_status,
       run_api_probe = run_api_probe_from_ui,
@@ -4527,6 +4802,7 @@ local function make_ui_context()
       cancel_pending_operation = cancel_pending_operation,
       cancel_generation = reaperai_cancel_generation,
       retry_message = reaperai_retry_message,
+      send_audio_request = send_audio_request,
       send_elevenlabs_request = send_elevenlabs_request,
       send_request = send_request,
       operation_risk_label = operation_risk_label,
@@ -4611,6 +4887,8 @@ end
 -- ============================================
 claim_reaperai_instance()
 load_config()
+ElevenVoiceSettings.load_cache()
+DoubaoVoiceSettings.load_cache()
 state.show_settings = false
 state.show_audio = false
 

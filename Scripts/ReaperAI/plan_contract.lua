@@ -55,6 +55,7 @@ local TRACK_CONSUMERS = {
 }
 
 local ITEM_CONSUMERS = {
+  ["item/set_color"] = true,
   ["item/fade"] = true,
   ["item/set_fade"] = true,
   ["item/fade_shape"] = true,
@@ -123,6 +124,9 @@ end
 local function has_item_target(params)
   params = params or {}
   if truthy(params.selected) or truthy(params.all) or truthy(params.all_items) then return true end
+  local scope = trim(params.scope or params.target_scope or params.selector):lower()
+  if scope == "time_selection" or scope == "time-selection" or scope == "current" or scope == "cursor" then return true end
+  if truthy(params.time_selection) or truthy(params.current) then return true end
   for _, key in ipairs({ "item", "target", "index", "name", "match", "item_name" }) do
     local value = trim(params[key])
     if value ~= "" and not selected_token(value) then return true end

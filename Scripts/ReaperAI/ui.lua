@@ -515,11 +515,6 @@ function UI.render_settings(ctx)
     reaper.ImGui_TextColored(state.ctx, 0x888888FF, state.llm_model_refresh_message)
   end
 
-  section_title("ElevenLabs")
-
-  local changed_eleven, new_eleven = key_field("API Key", "elevenlabs_key", config.elevenlabs_key, "show_elevenlabs_key")
-  if changed_eleven then config.elevenlabs_key = new_eleven end
-
   section_title("本机能力检测")
 
   local capability = invoke(ctx, "get_local_capability_status", false) or {}
@@ -598,22 +593,20 @@ end
 
 function UI.render_audio(ctx)
   local state = ctx.state
+  local config = ctx.config
+  local eleven = ctx.elevenlabs or {}
   state.audio_mode = (state.audio_mode == "vox") and "vox" or "sfx"
 
   reaper.ImGui_Text(state.ctx, "生成音频")
   reaper.ImGui_SameLine(state.ctx)
   if reaper.ImGui_Button(state.ctx, "?##audio_shortcut_help", 22, 22) then
     reaper.ShowMessageBox(
-      "11 快捷生成说明：\n\n" ..
-      "在对话输入框里，以 11 开头即可跳过普通 AI 对话，直接调用生成音频。\n\n" ..
-      "音效示例：\n" ..
-      "11 爆炸冲击音效\n" ..
-      "11sfx 金属按钮点击声\n\n" ..
-      "配音示例：\n" ..
-      "11vox 女声温柔说 欢迎回来\n" ..
-      "11vox 男声低沉说 任务开始\n\n" ..
-      "也可以在本页签里手动填写 SFX 或 VOX 参数后点击生成。",
-      "ReaperAI - 11 快捷生成音频",
+      "生成音频说明：\n\n" ..
+      "本页可以选择 ElevenLabs 或 火山引擎豆包，并分别使用音频生成 / 语音合成。\n\n" ..
+      "生成音频现在只通过本页签提交，避免不同服务商共用快捷词造成混乱。\n\n" ..
+      "ElevenLabs 可检测账户声线；豆包可刷新可用音色，并缓存下拉选择。\n\n" ..
+      "填写音频生成或语音合成参数后点击生成即可。",
+      "ReaperAI - 生成音频",
       0
     )
   end
@@ -621,12 +614,20 @@ function UI.render_audio(ctx)
 
   local available_w = select(1, reaper.ImGui_GetContentRegionAvail(state.ctx))
   local available_h = select(2, reaper.ImGui_GetContentRegionAvail(state.ctx))
-  local panel_w = math.max(260, math.min(680, available_w - 20))
-  local text_area_h = math.max(150, math.min(320, available_h - 355))
+  local panel_w = math.max(260, available_w - 20)
+  local text_area_h = math.max(150, available_h - 360)
   local accent = 0x2E6EA6FF
   local soft_button = 0x234160FF
   local muted = 0x9AA7B7FF
   local status_muted = 0x888888FF
+  local password_flags = 0
+  if reaper.ImGui_InputTextFlags_Password then
+    password_flags = reaper.ImGui_InputTextFlags_Password()
+  end
+  local multiline_flags = 0
+  if reaper.ImGui_InputTextFlags_NoHorizontalScroll then
+    multiline_flags = multiline_flags + reaper.ImGui_InputTextFlags_NoHorizontalScroll()
+  end
 
   local function colored_button(label, width, height, color)
     reaper.ImGui_PushStyleColor(state.ctx, reaper.ImGui_Col_Button(), color)
@@ -663,9 +664,213 @@ function UI.render_audio(ctx)
     return changed, new_value
   end
 
+  local function audio_ratio_slider(label, id, value, min_value, max_value, default_value)
+    label_text(label)
+    value = tonumber(value) or tonumber(default_value) or 1.0
+    min_value = tonumber(min_value) or 0.5
+    max_value = tonumber(max_value) or 2.0
+    default_value = tonumber(default_value) or 1.0
+
+    local changed = false
+    local new_value = value
+    local used_slider = false
+    reaper.ImGui_PushItemWidth(state.ctx, math.max(160, panel_w - 76))
+    if reaper.ImGui_SliderDouble then
+      local ok, c, v = pcall(reaper.ImGui_SliderDouble, state.ctx, "##" .. id, value, min_value, max_value, "%.2f")
+      if ok then
+        used_slider = true
+        changed = c == true
+        new_value = tonumber(v) or value
+      end
+    end
+    if not used_slider and reaper.ImGui_SliderFloat then
+      local ok, c, v = pcall(reaper.ImGui_SliderFloat, state.ctx, "##" .. id, value, min_value, max_value, "%.2f")
+      if ok then
+        used_slider = true
+        changed = c == true
+        new_value = tonumber(v) or value
+      end
+    end
+    if not used_slider then
+      local c, text_value = input_text(state.ctx, "##" .. id, string.format("%.2f", value), 0)
+      if c and tonumber(text_value) then
+        changed = true
+        new_value = tonumber(text_value)
+      end
+    end
+    reaper.ImGui_PopItemWidth(state.ctx)
+    reaper.ImGui_SameLine(state.ctx)
+    if reaper.ImGui_Button(state.ctx, "默认##" .. id .. "_reset", 68, 22) then
+      changed = true
+      new_value = default_value
+    end
+    new_value = math.max(min_value, math.min(max_value, new_value))
+    return changed, new_value
+  end
+
+  local function audio_char_units(ch)
+    if not ch or ch == "" then return 0 end
+    if #ch == 1 then
+      if ch:match("%s") then return 0.5 end
+      return 1
+    end
+    return 2
+  end
+
+  local function audio_wrap_line(line, max_units)
+    line = tostring(line or "")
+    if line == "" then return { "" } end
+    max_units = math.max(16, tonumber(max_units) or 60)
+    local out = {}
+    local current = ""
+    local units = 0
+    for ch in line:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+      local unit = audio_char_units(ch)
+      if units + unit > max_units and current ~= "" then
+        table.insert(out, current)
+        current = ""
+        units = 0
+        if ch:match("%s") then
+          ch = ""
+          unit = 0
+        end
+      end
+      current = current .. ch
+      units = units + unit
+    end
+    if current ~= "" or #out == 0 then table.insert(out, current) end
+    return out
+  end
+
+  local function audio_wrap_text_for_editor(text, width)
+    text = tostring(text or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+    if text == "" then return "" end
+    local max_units = math.max(18, math.floor(math.max(160, tonumber(width) or panel_w) / 7.2))
+    local out = {}
+    local index = 1
+    while true do
+      local next_break = text:find("\n", index, true)
+      local line
+      if next_break then
+        line = text:sub(index, next_break - 1)
+        index = next_break + 1
+      else
+        line = text:sub(index)
+      end
+      local wrapped = audio_wrap_line(line, max_units)
+      for _, part in ipairs(wrapped) do table.insert(out, part) end
+      if not next_break then break end
+      if index > #text then
+        table.insert(out, "")
+        break
+      end
+    end
+    return table.concat(out, "\n")
+  end
+
+  local function audio_visual_units(line)
+    local units = 0
+    for ch in tostring(line or ""):gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+      units = units + audio_char_units(ch)
+    end
+    return units
+  end
+
+  local audio_block_endings = { "。", "！", "？", "!", "?", ".", ")", "]", "】", "」", "”", "\"", "'" }
+
+  local function audio_ends_with_any(text, endings)
+    text = tostring(text or "")
+    for _, suffix in ipairs(endings) do
+      if suffix ~= "" and text:sub(-#suffix) == suffix then return true end
+    end
+    return false
+  end
+
+  local function audio_line_ends_block(line)
+    line = tostring(line or ""):gsub("%s+$", "")
+    if line == "" then return true end
+    if audio_ends_with_any(line, { "：", ":" }) and audio_visual_units(line) <= 24 then return true end
+    return audio_ends_with_any(line, audio_block_endings)
+  end
+
+  local function audio_line_starts_block(line)
+    line = tostring(line or ""):gsub("^%s+", "")
+    if line == "" then return true end
+    local half_colon = line:find(":", 1, true)
+    local full_colon = line:find("：", 1, true)
+    local colon = half_colon
+    if full_colon and (not colon or full_colon < colon) then colon = full_colon end
+    if not colon then return false end
+    local label = line:sub(1, colon - 1)
+    return label ~= "" and audio_visual_units(label) <= 24
+  end
+
+  local function audio_should_collapse_editor_break(prev, next_line, width)
+    local left = tostring(prev or ""):gsub("%s+$", "")
+    local right = tostring(next_line or ""):gsub("^%s+", "")
+    if left == "" or right == "" then return false end
+    if audio_line_ends_block(left) or audio_line_starts_block(right) then return false end
+    local left_units = audio_visual_units(left)
+    local right_units = audio_visual_units(right)
+    local max_units = math.max(18, math.floor(math.max(160, tonumber(width) or panel_w) / 7.2))
+    if left_units <= 3 or right_units <= 3 then return true end
+    if right_units <= 18 and left_units >= 18 then return true end
+    return left_units >= (max_units - 6)
+  end
+
+  local function audio_normalize_editor_text(text, width)
+    text = tostring(text or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+    if text == "" then return "" end
+
+    local out = {}
+    local pending = nil
+    for line in (text .. "\n"):gmatch("(.-)\n") do
+      if pending == nil then
+        pending = line
+      elseif audio_should_collapse_editor_break(pending, line, width) then
+        local left = pending:gsub("%s+$", "")
+        local right = line:gsub("^%s+", "")
+        local joiner = ""
+        if left:match("[%w%)%]]$") and right:match("^[%w%(]") then joiner = " " end
+        pending = left .. joiner .. right
+      else
+        table.insert(out, pending)
+        pending = line
+      end
+    end
+    if pending ~= nil then table.insert(out, pending) end
+    return table.concat(out, "\n")
+  end
+
   local function audio_area(label, id, value)
     label_text(label)
-    return input_text_multiline(state.ctx, "##" .. id, value, panel_w, text_area_h, 0)
+    local area_w = math.max(260, (select(1, reaper.ImGui_GetContentRegionAvail(state.ctx)) or panel_w) - 4)
+    local area_h = math.max(150, (select(2, reaper.ImGui_GetContentRegionAvail(state.ctx)) or text_area_h) - 96)
+    local original = tostring(value or "")
+    local raw_value = audio_normalize_editor_text(original, area_w)
+    local width_key = math.floor(area_w / 8)
+    state.audio_editor_cache = state.audio_editor_cache or {}
+    local cache = state.audio_editor_cache[id]
+    if not cache or cache.raw ~= raw_value or cache.width_key ~= width_key then
+      cache = {
+        raw = raw_value,
+        width_key = width_key,
+        display = audio_wrap_text_for_editor(raw_value, area_w),
+      }
+      state.audio_editor_cache[id] = cache
+    end
+    local changed, new_value = input_text_multiline(state.ctx, "##" .. id, cache.display or "", area_w, area_h, multiline_flags)
+    if changed then
+      local next_raw = audio_normalize_editor_text(new_value, area_w)
+      cache.raw = next_raw
+      cache.width_key = width_key
+      cache.display = audio_wrap_text_for_editor(next_raw, area_w)
+      return true, next_raw
+    end
+    if raw_value ~= original then
+      return true, raw_value
+    end
+    return false, raw_value
   end
 
   local function audio_request_status_text()
@@ -710,7 +915,95 @@ function UI.render_audio(ctx)
     render_audio_status()
   end
 
-  local eleven = ctx.elevenlabs or {}
+  local function normalize_provider(provider)
+    if type(eleven.normalize_provider) == "function" then
+      return eleven.normalize_provider(provider)
+    end
+    provider = tostring(provider or ""):lower()
+    return (provider == "doubao" or provider == "volcengine" or provider == "volc") and "doubao" or "elevenlabs"
+  end
+
+  local function provider_label(provider)
+    if type(eleven.provider_label) == "function" then
+      return eleven.provider_label(provider)
+    end
+    return normalize_provider(provider) == "doubao" and "火山引擎豆包" or "ElevenLabs"
+  end
+
+  local provider = normalize_provider(config.audio_provider or "elevenlabs")
+  config.audio_provider = provider
+
+  local function audio_key_field(label, id, value, visible_state_name)
+    label_text(label)
+    local key_field_w = math.max(190, panel_w - 76)
+    reaper.ImGui_PushItemWidth(state.ctx, key_field_w)
+    local flags = state[visible_state_name] and 0 or password_flags
+    local changed, new_value = input_text(state.ctx, "##" .. id, value or "", flags)
+    reaper.ImGui_PopItemWidth(state.ctx)
+    reaper.ImGui_SameLine(state.ctx)
+    if reaper.ImGui_Button(state.ctx, state[visible_state_name] and ("隐藏##" .. id .. "_toggle") or ("显示##" .. id .. "_toggle"), 68, 22) then
+      state[visible_state_name] = not state[visible_state_name]
+    end
+    return changed, new_value
+  end
+
+  local function render_elevenlabs_voice_refresh()
+    label_text("声线检测")
+    local refresh_disabled = state.audio_vox_voices_refreshing == true
+    if refresh_disabled and reaper.ImGui_BeginDisabled then reaper.ImGui_BeginDisabled(state.ctx, true) end
+    if reaper.ImGui_Button(state.ctx, refresh_disabled and "刷新中##audio_voice_refresh_config" or "刷新声线##audio_voice_refresh_config", 104, 24) then
+      invoke(ctx, "refresh_elevenlabs_voices")
+    end
+    if refresh_disabled and reaper.ImGui_EndDisabled then reaper.ImGui_EndDisabled(state.ctx) end
+    reaper.ImGui_SameLine(state.ctx)
+    local message = state.audio_vox_voice_refresh_message
+    if not message or message == "" then
+      message = "刷新后会缓存可用声线"
+    end
+    reaper.ImGui_TextColored(state.ctx, status_muted, message)
+  end
+
+  local function render_doubao_voice_refresh()
+    label_text("音色检测")
+    local refresh_disabled = state.audio_doubao_voices_refreshing == true
+    if refresh_disabled and reaper.ImGui_BeginDisabled then reaper.ImGui_BeginDisabled(state.ctx, true) end
+    if reaper.ImGui_Button(state.ctx, refresh_disabled and "刷新中##doubao_voice_refresh_config" or "刷新音色##doubao_voice_refresh_config", 104, 24) then
+      invoke(ctx, "refresh_doubao_voices")
+    end
+    if refresh_disabled and reaper.ImGui_EndDisabled then reaper.ImGui_EndDisabled(state.ctx) end
+    reaper.ImGui_SameLine(state.ctx)
+    local message = state.audio_doubao_voice_refresh_message
+    if not message or message == "" then
+      message = "刷新后会缓存可用音色"
+    end
+    reaper.ImGui_TextColored(state.ctx, status_muted, message)
+  end
+
+  local function render_audio_provider_config()
+    if provider == "doubao" then
+      label_text("基础配置")
+      local changed_key, new_key = audio_key_field("豆包 API Key", "doubao_api_key", config.doubao_api_key or "", "show_doubao_key")
+      if changed_key then config.doubao_api_key = new_key end
+      render_doubao_voice_refresh()
+    else
+      label_text("基础配置")
+      local changed_key, new_key = audio_key_field("ElevenLabs API Key", "elevenlabs_key_audio", config.elevenlabs_key or "", "show_elevenlabs_key")
+      if changed_key then config.elevenlabs_key = new_key end
+      render_elevenlabs_voice_refresh()
+    end
+
+    if reaper.ImGui_Button(state.ctx, "保存音频配置##audio_save_config", 120, 26) then
+      local ok, msg = invoke(ctx, "save_config")
+      if ok then
+        state.status = "音频配置已保存"
+      else
+        state.status = msg or "音频配置保存失败"
+      end
+      state.audio_status = state.status
+    end
+    reaper.ImGui_SameLine(state.ctx)
+    reaper.ImGui_TextColored(state.ctx, status_muted, "配置保存在本地")
+  end
 
   local function selected_vox_voice()
     if type(eleven.voice_by_id) ~= "function" then return nil end
@@ -748,13 +1041,12 @@ function UI.render_audio(ctx)
       selected = nil
     end
 
-    local preview = (#voices > 0) and "自动选择" or "请先刷新声线"
+    local preview = (#voices > 0) and "自动选择" or "请先在服务商配置中刷新声线"
     if selected and type(eleven.voice_label) == "function" then
       preview = eleven.voice_label(selected)
     end
 
-    local refresh_w = 84
-    local combo_w = math.max(160, panel_w - refresh_w - 8)
+    local combo_w = panel_w
     reaper.ImGui_PushItemWidth(state.ctx, combo_w)
     if begin_combo(state.ctx, "##audio_vox_voice_combo", preview) then
       reaper.ImGui_PushItemWidth(state.ctx, math.max(140, combo_w - 18))
@@ -768,7 +1060,7 @@ function UI.render_audio(ctx)
         end
         reaper.ImGui_Separator(state.ctx)
       else
-        reaper.ImGui_TextColored(state.ctx, status_muted, "点击刷新检测可用声线")
+        reaper.ImGui_TextColored(state.ctx, status_muted, "请在服务商配置中刷新可用声线")
       end
 
       local visible = 0
@@ -791,62 +1083,440 @@ function UI.render_audio(ctx)
       end_combo(state.ctx)
     end
     reaper.ImGui_PopItemWidth(state.ctx)
+  end
 
-    reaper.ImGui_SameLine(state.ctx)
-    local refresh_disabled = state.audio_vox_voices_refreshing == true
-    if refresh_disabled and reaper.ImGui_BeginDisabled then reaper.ImGui_BeginDisabled(state.ctx, true) end
-    if reaper.ImGui_Button(state.ctx, refresh_disabled and "刷新中##audio_voice_refresh" or "刷新##audio_voice_refresh", refresh_w, 22) then
-      invoke(ctx, "refresh_elevenlabs_voices")
+  local function doubao_language_options()
+    if type(eleven.doubao_language_options) == "function" then
+      return eleven.doubao_language_options()
     end
-    if refresh_disabled and reaper.ImGui_EndDisabled then reaper.ImGui_EndDisabled(state.ctx) end
+    return {
+      { id = "zh_mix", label = "中英混" },
+      { id = "ja", label = "日语" },
+      { id = "id", label = "印尼语" },
+      { id = "es", label = "西班牙语" },
+    }
+  end
 
-    if state.audio_vox_voice_refresh_message and state.audio_vox_voice_refresh_message ~= "" then
-      reaper.ImGui_TextColored(state.ctx, status_muted, state.audio_vox_voice_refresh_message)
+  local function doubao_language_label(language)
+    if type(eleven.doubao_language_label) == "function" then
+      return eleven.doubao_language_label(language)
+    end
+    language = tostring(language or "")
+    if language == "ja" then return "日语" end
+    if language == "id" then return "印尼语" end
+    if language == "es" then return "西班牙语" end
+    return "中英混"
+  end
+
+  local function doubao_accent_options(language)
+    if type(eleven.doubao_accent_options) == "function" then
+      return eleven.doubao_accent_options(language)
+    end
+    return {
+      { id = "default", label = "默认" },
+      { id = "dongbei", label = "东北" },
+      { id = "shaanxi", label = "陕西" },
+      { id = "sichuan", label = "四川" },
+    }
+  end
+
+  local function normalize_doubao_language(language)
+    if type(eleven.normalize_doubao_language) == "function" then
+      return eleven.normalize_doubao_language(language)
+    end
+    language = tostring(language or "")
+    if language == "ja" or language == "id" or language == "es" then return language end
+    return "zh_mix"
+  end
+
+  local function normalize_doubao_accent(language, accent)
+    if type(eleven.normalize_doubao_accent) == "function" then
+      return eleven.normalize_doubao_accent(language, accent)
+    end
+    accent = tostring(accent or "")
+    if language ~= "zh_mix" then return "default" end
+    if accent == "dongbei" or accent == "shaanxi" or accent == "sichuan" then return accent end
+    return "default"
+  end
+
+  local function set_doubao_language(language)
+    language = normalize_doubao_language(language)
+    config.doubao_language = language
+    state.audio_doubao_language = language
+    if language ~= "zh_mix" then
+      config.doubao_accent = "default"
+      state.audio_doubao_accent = "default"
     else
-      reaper.ImGui_TextColored(state.ctx, status_muted, "点击刷新检测当前 API 可用声线")
+      config.doubao_accent = normalize_doubao_accent(language, config.doubao_accent or state.audio_doubao_accent or "default")
+      state.audio_doubao_accent = config.doubao_accent
     end
   end
 
-  mode_button("SFX 模式##audio_top_sfx", "sfx")
+  local function set_doubao_accent(accent)
+    local language = normalize_doubao_language(config.doubao_language or state.audio_doubao_language)
+    accent = normalize_doubao_accent(language, accent)
+    config.doubao_accent = accent
+    state.audio_doubao_accent = accent
+  end
+
+  local function selected_doubao_voice()
+    if type(eleven.doubao_voice_by_id) ~= "function" then return nil end
+    local voice_id = tostring(state.audio_doubao_voice_id or config.doubao_speaker or "")
+    if voice_id == "" then voice_id = tostring(config.doubao_speaker or "") end
+    return eleven.doubao_voice_by_id(voice_id, state.audio_doubao_dynamic_voices or {})
+  end
+
+  local function doubao_voice_options()
+    if type(eleven.doubao_voice_all_options) == "function" then
+      return eleven.doubao_voice_all_options(state.audio_doubao_dynamic_voices or {})
+    end
+    if type(eleven.doubao_voice_options) ~= "function" then return {} end
+    return eleven.doubao_voice_options("zh_mix", "default", state.audio_doubao_dynamic_voices or {})
+  end
+
+  local function doubao_voice_display_name(voice)
+    if voice and type(eleven.doubao_voice_label) == "function" then
+      return eleven.doubao_voice_label(voice)
+    end
+    if voice then return tostring(voice.name or voice.id or "") end
+    return ""
+  end
+
+  local function doubao_voice_language_options(voice)
+    if voice and type(eleven.doubao_voice_language_options) == "function" then
+      return eleven.doubao_voice_language_options(voice)
+    end
+    return doubao_language_options()
+  end
+
+  local function doubao_voice_accent_options_for_voice(voice, language)
+    if voice and type(eleven.doubao_voice_accent_options) == "function" then
+      return eleven.doubao_voice_accent_options(voice, language)
+    end
+    return doubao_accent_options(language)
+  end
+
+  local function doubao_voice_default_language(voice)
+    if voice and type(eleven.doubao_voice_default_language) == "function" then
+      return eleven.doubao_voice_default_language(voice)
+    end
+    return "zh_mix"
+  end
+
+  local function doubao_voice_default_accent(voice, language)
+    if voice and type(eleven.doubao_voice_default_accent) == "function" then
+      return eleven.doubao_voice_default_accent(voice, language)
+    end
+    return "default"
+  end
+
+  local function doubao_voice_supports_language(voice, language)
+    if not voice then return false end
+    if type(eleven.doubao_voice_supports_language) == "function" then
+      return eleven.doubao_voice_supports_language(voice, language)
+    end
+    return true
+  end
+
+  local function doubao_voice_supports_accent(voice, language, accent_value)
+    if not voice then return false end
+    if type(eleven.doubao_voice_supports_accent) == "function" then
+      return eleven.doubao_voice_supports_accent(voice, language, accent_value)
+    end
+    return true
+  end
+
+  local function current_doubao_language()
+    return normalize_doubao_language(config.doubao_language or state.audio_doubao_language or "zh_mix")
+  end
+
+  local function current_doubao_accent()
+    return normalize_doubao_accent(current_doubao_language(), config.doubao_accent or state.audio_doubao_accent or "default")
+  end
+
+  local function doubao_voice_supports_current(voice)
+    if not voice then return false end
+    if type(eleven.doubao_voice_supports) == "function" then
+      return eleven.doubao_voice_supports(current_doubao_language(), current_doubao_accent(), voice)
+    end
+    return true
+  end
+
+  local function sync_doubao_settings_to_voice(voice)
+    if not voice then return end
+    local language = current_doubao_language()
+    if not doubao_voice_supports_language(voice, language) then
+      language = normalize_doubao_language(doubao_voice_default_language(voice))
+    end
+    local accent_value = current_doubao_accent()
+    if not doubao_voice_supports_accent(voice, language, accent_value) then
+      accent_value = normalize_doubao_accent(language, doubao_voice_default_accent(voice, language))
+    end
+    config.doubao_language = language
+    state.audio_doubao_language = language
+    config.doubao_accent = accent_value
+    state.audio_doubao_accent = accent_value
+  end
+
+  local function doubao_voice_resource_id(voice)
+    if voice and type(eleven.doubao_voice_resource_id) == "function" then
+      return eleven.doubao_voice_resource_id(voice)
+    end
+    return ""
+  end
+
+  local function doubao_control_supported(voice, control)
+    if not voice or type(eleven.doubao_voice_supports_control) ~= "function" then return true end
+    return eleven.doubao_voice_supports_control(voice, control)
+  end
+
+  local function render_doubao_ratio_slider(label, id, value, min_value, max_value, default_value, control, voice)
+    local disabled = voice and not doubao_control_supported(voice, control)
+    if disabled and reaper.ImGui_BeginDisabled then reaper.ImGui_BeginDisabled(state.ctx, true) end
+    local changed, new_value = audio_ratio_slider(label, id, value, min_value, max_value, default_value)
+    if disabled and reaper.ImGui_EndDisabled then reaper.ImGui_EndDisabled(state.ctx) end
+    if disabled then
+      reaper.ImGui_TextColored(state.ctx, status_muted, "当前音色不支持" .. tostring(label))
+    end
+    return changed and not disabled, new_value
+  end
+
+  local function render_doubao_language_controls()
+    local selected = selected_doubao_voice()
+    if not selected then
+      reaper.ImGui_TextColored(state.ctx, status_muted, "选择音色后显示语言")
+      return
+    end
+    sync_doubao_settings_to_voice(selected)
+    config.doubao_language = normalize_doubao_language(config.doubao_language or state.audio_doubao_language)
+    config.doubao_accent = normalize_doubao_accent(config.doubao_language, config.doubao_accent or state.audio_doubao_accent)
+    state.audio_doubao_language = config.doubao_language
+    state.audio_doubao_accent = config.doubao_accent
+
+    label_text("语言")
+    local language_options = doubao_voice_language_options(selected)
+    reaper.ImGui_PushItemWidth(state.ctx, panel_w)
+    if begin_combo(state.ctx, "##doubao_language_combo", doubao_language_label(config.doubao_language)) then
+      for _, item in ipairs(language_options) do
+        if selectable(state.ctx, tostring(item.label or item.id), tostring(item.id) == tostring(config.doubao_language)) then
+          set_doubao_language(item.id)
+          sync_doubao_settings_to_voice(selected)
+          close_current_popup(state.ctx)
+        end
+      end
+      end_combo(state.ctx)
+    end
+    reaper.ImGui_PopItemWidth(state.ctx)
+
+    local accent_options = doubao_voice_accent_options_for_voice(selected, config.doubao_language)
+    local show_accent = config.doubao_language == "zh_mix" and #accent_options > 1
+    if not show_accent then
+      set_doubao_accent(doubao_voice_default_accent(selected, config.doubao_language))
+      return
+    end
+
+    reaper.ImGui_Spacing(state.ctx)
+    label_text("口音")
+    local button_w = math.max(56, math.floor((panel_w - (#accent_options - 1) * 8) / math.max(1, #accent_options)))
+    for i, item in ipairs(accent_options) do
+      if i > 1 then reaper.ImGui_SameLine(state.ctx) end
+      local active = tostring(config.doubao_accent or "default") == tostring(item.id)
+      if colored_button(tostring(item.label or item.id) .. "##doubao_accent_" .. tostring(item.id), button_w, 26, active and accent or soft_button) then
+        set_doubao_accent(item.id)
+      end
+    end
+  end
+
+  local function render_doubao_voice_picker()
+    label_text("音色")
+    local voices = doubao_voice_options()
+    local selected = selected_doubao_voice()
+    local saved_id = tostring(config.doubao_speaker or state.audio_doubao_speaker or "")
+    local preview = "请先在服务商配置中刷新音色"
+    if selected then
+      sync_doubao_settings_to_voice(selected)
+      preview = doubao_voice_display_name(selected)
+    elseif saved_id ~= "" then
+      preview = "已保存音色"
+    elseif #voices > 0 then
+      preview = "请选择音色"
+    end
+
+    local combo_w = panel_w
+    reaper.ImGui_PushItemWidth(state.ctx, combo_w)
+    if begin_combo(state.ctx, "##doubao_voice_combo", preview) then
+      reaper.ImGui_PushItemWidth(state.ctx, math.max(140, combo_w - 18))
+      local changed_filter, new_filter = input_text(state.ctx, "##doubao_voice_filter", state.audio_doubao_voice_filter or "", 0)
+      reaper.ImGui_PopItemWidth(state.ctx)
+      if changed_filter then state.audio_doubao_voice_filter = new_filter end
+
+      if #voices == 0 then
+        reaper.ImGui_TextColored(state.ctx, status_muted, "请在服务商配置中刷新可用音色")
+      end
+
+      local visible = 0
+      for _, voice in ipairs(voices) do
+        local matches = type(eleven.doubao_voice_matches_filter) ~= "function" or eleven.doubao_voice_matches_filter(voice, state.audio_doubao_voice_filter or "")
+        if matches then
+          visible = visible + 1
+          local label = (type(eleven.doubao_voice_menu_label) == "function") and eleven.doubao_voice_menu_label(voice) or tostring(voice.name or voice.id or "Voice")
+          local selected_voice = tostring(config.doubao_speaker or "") == tostring(voice.id or "")
+          if selectable(state.ctx, label, selected_voice) then
+            config.doubao_speaker = tostring(voice.id or "")
+            state.audio_doubao_speaker = config.doubao_speaker
+            state.audio_doubao_voice_id = config.doubao_speaker
+            sync_doubao_settings_to_voice(voice)
+            close_current_popup(state.ctx)
+          end
+        end
+      end
+
+      if visible == 0 and #voices > 0 then
+        reaper.ImGui_TextColored(state.ctx, status_muted, "当前筛选下没有匹配音色")
+      end
+      end_combo(state.ctx)
+    end
+    reaper.ImGui_PopItemWidth(state.ctx)
+    if saved_id ~= "" and not selected then
+      reaper.ImGui_TextColored(state.ctx, 0xFFAA00FF, "已保存音色不在当前列表，请刷新或重新选择")
+    end
+  end
+
+  local function render_doubao_advanced_controls()
+    local selected = selected_doubao_voice()
+    if not selected then return end
+    reaper.ImGui_Spacing(state.ctx)
+    local label = state.audio_doubao_advanced_open and "高级调节 v##doubao_advanced_toggle" or "高级调节 >##doubao_advanced_toggle"
+    if reaper.ImGui_Button(state.ctx, label, 104, 24) then
+      state.audio_doubao_advanced_open = not state.audio_doubao_advanced_open
+    end
+    if not state.audio_doubao_advanced_open then return end
+
+    reaper.ImGui_Spacing(state.ctx)
+    local changed_speed, new_speed = render_doubao_ratio_slider("语速", "doubao_speed_ratio", config.doubao_speed_ratio or state.audio_doubao_speed_ratio or 1.0, 0.5, 2.0, 1.0, "speed", selected)
+    if changed_speed then
+      config.doubao_speed_ratio = new_speed
+      state.audio_doubao_speed_ratio = new_speed
+    end
+    local changed_pitch, new_pitch = render_doubao_ratio_slider("音调", "doubao_pitch_ratio", config.doubao_pitch_ratio or state.audio_doubao_pitch_ratio or 1.0, 0.5, 2.0, 1.0, "pitch", selected)
+    if changed_pitch then
+      config.doubao_pitch_ratio = new_pitch
+      state.audio_doubao_pitch_ratio = new_pitch
+    end
+    local changed_volume, new_volume = render_doubao_ratio_slider("音量", "doubao_volume_ratio", config.doubao_volume_ratio or state.audio_doubao_volume_ratio or 1.0, 0.5, 2.0, 1.0, "volume", selected)
+    if changed_volume then
+      config.doubao_volume_ratio = new_volume
+      state.audio_doubao_volume_ratio = new_volume
+    end
+  end
+
+  label_text("服务商")
+  local provider_combo_w = math.max(160, math.min(260, panel_w - 70))
+  reaper.ImGui_PushItemWidth(state.ctx, provider_combo_w)
+  if begin_combo(state.ctx, "##audio_provider_combo", provider_label(provider)) then
+    if selectable(state.ctx, "ElevenLabs##audio_provider_select_elevenlabs", provider == "elevenlabs") then
+      provider = "elevenlabs"
+      config.audio_provider = provider
+      close_current_popup(state.ctx)
+    end
+    if selectable(state.ctx, "火山引擎豆包##audio_provider_select_doubao", provider == "doubao") then
+      provider = "doubao"
+      config.audio_provider = provider
+      close_current_popup(state.ctx)
+    end
+    end_combo(state.ctx)
+  end
+  reaper.ImGui_PopItemWidth(state.ctx)
   reaper.ImGui_SameLine(state.ctx)
-  mode_button("VOX 模式##audio_top_vox", "vox")
+  if reaper.ImGui_Button(state.ctx, state.audio_provider_config_open and "收起##audio_provider_config_toggle" or "配置##audio_provider_config_toggle", 58, 22) then
+    state.audio_provider_config_open = not state.audio_provider_config_open
+  end
+  if state.audio_provider_config_open then
+    reaper.ImGui_Spacing(state.ctx)
+    render_audio_provider_config()
+  end
+  section_separator(false)
+
+  mode_button("音频生成##audio_top_sfx", "sfx")
+  reaper.ImGui_SameLine(state.ctx)
+  mode_button("语音合成##audio_top_vox", "vox")
   section_separator(false)
 
   if state.audio_mode == "vox" then
-    reaper.ImGui_Text(state.ctx, "VOX 配音")
+    reaper.ImGui_Text(state.ctx, "语音合成 - " .. provider_label(provider))
     reaper.ImGui_Spacing(state.ctx)
 
-    label_text("性别")
-    if colored_button("男##audio_vox_male", 56, 26, (state.audio_vox_gender == "male") and accent or soft_button) then
-      set_vox_gender("male")
-    end
-    reaper.ImGui_SameLine(state.ctx)
-    if colored_button("女##audio_vox_female", 56, 26, (state.audio_vox_gender ~= "male") and accent or soft_button) then
-      set_vox_gender("female")
+    if provider == "doubao" then
+      render_doubao_voice_picker()
+      reaper.ImGui_Spacing(state.ctx)
+      render_doubao_language_controls()
+      render_doubao_advanced_controls()
+    else
+      label_text("性别")
+      if colored_button("男##audio_vox_male", 56, 26, (state.audio_vox_gender == "male") and accent or soft_button) then
+        set_vox_gender("male")
+      end
+      reaper.ImGui_SameLine(state.ctx)
+      if colored_button("女##audio_vox_female", 56, 26, (state.audio_vox_gender ~= "male") and accent or soft_button) then
+        set_vox_gender("female")
+      end
+
+      reaper.ImGui_Spacing(state.ctx)
+      render_vox_voice_picker()
+
+      reaper.ImGui_Spacing(state.ctx)
+      local changed_performance, new_performance = audio_line("语气/表演", "audio_vox_performance", state.audio_vox_performance or "")
+      if changed_performance then state.audio_vox_performance = new_performance end
     end
 
-    reaper.ImGui_Spacing(state.ctx)
-    render_vox_voice_picker()
-    reaper.ImGui_Spacing(state.ctx)
-    local changed_performance, new_performance = audio_line("语气/表演", "audio_vox_performance", state.audio_vox_performance or "")
-    if changed_performance then state.audio_vox_performance = new_performance end
     section_separator(false)
     local changed_text, new_text = audio_area("台词", "audio_vox_text", state.audio_vox_text or "")
     if changed_text then state.audio_vox_text = new_text end
 
     section_separator(true)
     render_primary_buttons(function()
-      invoke(ctx, "send_elevenlabs_request", {
-        mode = "vox",
-        gender = state.audio_vox_gender or "female",
-        voice_id = resolved_vox_voice_id(),
-        performance = state.audio_vox_performance or "",
-        performance_prompt = state.audio_vox_performance or "",
-        spoken_text = state.audio_vox_text or "",
-      })
+      if provider == "doubao" then
+        local selected = selected_doubao_voice()
+        local language = current_doubao_language()
+        local accent_value = current_doubao_accent()
+        if not selected then
+          state.status = "请先选择豆包语音合成音色"
+          return
+        end
+        if not doubao_voice_supports_current(selected) then
+          state.status = "当前豆包音色不支持所选语言/口音"
+          return
+        end
+        invoke(ctx, "send_audio_request", {
+          provider = provider,
+          mode = "vox",
+          speaker = config.doubao_speaker or "",
+          speaker_name = doubao_voice_display_name(selected),
+          language = language,
+          accent = accent_value,
+          speed_ratio = config.doubao_speed_ratio or state.audio_doubao_speed_ratio or 1.0,
+          pitch_ratio = config.doubao_pitch_ratio or state.audio_doubao_pitch_ratio or 1.0,
+          volume_ratio = config.doubao_volume_ratio or state.audio_doubao_volume_ratio or 1.0,
+          resource_id = doubao_voice_resource_id(selected),
+          performance = "",
+          performance_prompt = "",
+          spoken_text = state.audio_vox_text or "",
+          format = "wav",
+        })
+      else
+        invoke(ctx, "send_audio_request", {
+          provider = provider,
+          mode = "vox",
+          gender = state.audio_vox_gender or "female",
+          voice_id = resolved_vox_voice_id(),
+          performance = state.audio_vox_performance or "",
+          performance_prompt = state.audio_vox_performance or "",
+          spoken_text = state.audio_vox_text or "",
+        })
+      end
     end)
   else
-    reaper.ImGui_Text(state.ctx, "SFX 音效")
+    reaper.ImGui_Text(state.ctx, "音频生成 - " .. provider_label(provider))
     reaper.ImGui_Spacing(state.ctx)
 
     local changed_track, new_track = audio_line("轨道名", "audio_sfx_track", state.audio_sfx_track_name or "")
@@ -857,10 +1527,13 @@ function UI.render_audio(ctx)
 
     section_separator(true)
     render_primary_buttons(function()
-      invoke(ctx, "send_elevenlabs_request", {
+      invoke(ctx, "send_audio_request", {
+        provider = provider,
         mode = "sfx",
         track_name = state.audio_sfx_track_name or "",
         prompt = state.audio_sfx_prompt or "",
+        text_prompt = state.audio_sfx_prompt or "",
+        format = "wav",
       })
     end)
   end
@@ -1213,10 +1886,9 @@ function UI.render_chat(ctx)
 
   if (btn_clicked or (has_input and enter_pressed)) and has_input then
     local msg = state.input_text
-    local is_elevenlabs = msg:match("^%s*11") ~= nil
     local skip_send = false
 
-    if state.pending_operation and not is_elevenlabs then
+    if state.pending_operation then
       table.insert(state.messages, {
         role = "assistant",
         content = "请先确认或取消当前待执行操作，再发送新的执行请求。",
@@ -1231,22 +1903,16 @@ function UI.render_chat(ctx)
       state.input_text = ""
       table.insert(state.messages, { role = "user", content = msg })
 
-      if is_elevenlabs then
-        if not invoke(ctx, "send_elevenlabs_request", msg) then
-          state.status = state.status or "音频生成启动失败"
-        end
+      local result = invoke(ctx, "send_request", msg)
+      if result == "clarification_handled" then
+        state.waiting = false
+        state.scroll = true
+      elseif result then
+        state.waiting = true
+        state.status = state.status or "等待 AI 响应..."
+        state.scroll = true
       else
-        local result = invoke(ctx, "send_request", msg)
-        if result == "clarification_handled" then
-          state.waiting = false
-          state.scroll = true
-        elseif result then
-          state.waiting = true
-          state.status = state.status or "等待 AI 响应..."
-          state.scroll = true
-        else
-          state.status = "发送失败"
-        end
+        state.status = "发送失败"
       end
     end
   end
@@ -1263,7 +1929,7 @@ function UI.render(ctx)
   end
 
   local flags = reaper.ImGui_WindowFlags_MenuBar()
-  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.4 智能助手", true, flags)
+  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.5 智能助手", true, flags)
 
   local win_w, win_h = safe_window_size(state.ctx)
   local collapsed = safe_window_collapsed(state.ctx)

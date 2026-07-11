@@ -26,10 +26,14 @@ import traceback
 import subprocess
 import shutil
 import re
+import base64
+import uuid
 
 RESPONSE_TIMEOUT = 90  # 秒
 TEMP_DIR = os.environ.get('TEMP', 'C:\\Temp')
 ELEVENLABS_TIMEOUT = 180  # 音频生成可能需要更长时间
+DOUBAO_TIMEOUT = 180
+DOUBAO_DEFAULT_MODEL = "seed-audio-1.0"
 SFX_DURATION_SECONDS = 4.0  # 固定短音效时长，避免 Sound Effects 长时间排队
 VOICE_LIST_TIMEOUT = 30
 VOICE_PROBE_TIMEOUT = 8  # 刷新声线时的可用性探针超时
@@ -37,6 +41,7 @@ VOICE_PROBE_TEXT = "test"
 MAX_VOICE_PROBES = 40
 ELEVENLABS_EXPRESSIVE_MODEL = "eleven_v3"
 ELEVENLABS_STABLE_MODEL = "eleven_multilingual_v2"
+CANCEL_FILE = ""
 
 # ============================================
 # v1.0+ ElevenLabs 免费语音库（内置，用户无需手动配置）
@@ -75,6 +80,33 @@ FREE_VOICE_DISPLAY_NAMES = {
     "zrHiDhphv9ZnVXBqCLhn": "Mimi",
 }
 
+DOUBAO_TTS_RESOURCE_ID = "seed-tts-2.0"
+DOUBAO_CLONE_RESOURCE_ID = "seed-icl-2.0"
+DOUBAO_TTS_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
+DOUBAO_AUDIO_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/create"
+
+DOUBAO_BUILTIN_VOICES = [
+    {
+        "id": "zh_female_vv_uranus_bigtts",
+        "name": "Vivi",
+        "tags": ["female", "zh", "lang:zh_mix", "lang:ja", "lang:id", "lang:es", "accent:default", "accent:dongbei", "accent:shaanxi", "accent:sichuan"],
+    },
+    {"id": "zh_female_xiaohe_uranus_bigtts", "name": "小何", "tags": ["female", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_male_m191_uranus_bigtts", "name": "云舟", "tags": ["male", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_male_taocheng_uranus_bigtts", "name": "小天", "tags": ["male", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_male_liufei_uranus_bigtts", "name": "刘飞", "tags": ["male", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_female_sophie_uranus_bigtts", "name": "魅力苏菲", "tags": ["female", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_female_qingxinnvsheng_uranus_bigtts", "name": "清新女声", "tags": ["female", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_female_cancan_uranus_bigtts", "name": "灿灿", "tags": ["female", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_female_tianmeitaozi_uranus_bigtts", "name": "甜美桃子", "tags": ["female", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_male_wennuanahu_uranus_bigtts", "name": "温暖阿虎", "tags": ["male", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_female_gaolengyujie_uranus_bigtts", "name": "高冷御姐", "tags": ["female", "character", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_female_sajiaoxuemei_uranus_bigtts", "name": "撒娇学妹", "tags": ["female", "character", "zh", "lang:zh_mix", "accent:default"]},
+    {"id": "zh_female_mizaitongxue_v2_saturn_bigtts", "name": "米仔同学", "tags": ["female", "zh", "lang:zh_mix", "accent:default"]},
+]
+
+DOUBAO_CONTROL_TAGS = ("control:speed", "control:pitch", "control:volume")
+
 FREE_VOICE_IDS = {voice["id"] for voice in FREE_VOICES}
 
 # 日志函数（保留用于故障排查）
@@ -89,6 +121,10 @@ EMERGENCY_LOG = os.path.join(TEMP_DIR, 'rai_worker_EMERGENCY.log')
 def emergency_log(msg):
     with open(EMERGENCY_LOG, 'a', encoding='utf-8') as f:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
+
+
+def cancel_requested():
+    return bool(CANCEL_FILE and os.path.exists(CANCEL_FILE))
 
 try:
     import requests
@@ -307,11 +343,15 @@ def make_api_request(api_url, api_key, model, messages):
 
 
 def write_signal_file(signal_file):
+    if cancel_requested():
+        return
     with open(signal_file, 'w') as f:
         f.write("done")
 
 
 def write_stream_event(resp_file, event):
+    if cancel_requested():
+        return
     os.makedirs(os.path.dirname(resp_file) or ".", exist_ok=True)
     with open(resp_file, 'a', encoding='utf-8', newline='\n') as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -472,9 +512,13 @@ def make_api_stream_request(api_url, api_key, model, messages, resp_file, signal
     }
 
     try:
+        if cancel_requested():
+            return
         payload = build_llm_payload(api_url, model, messages)
         payload["stream"] = True
         response = post_llm_payload(api_url, headers, payload, stream=True)
+        if cancel_requested():
+            return
 
         if response.status_code != 200:
             error_detail = response.text[:500] if len(response.text) > 500 else response.text
@@ -489,7 +533,11 @@ def make_api_stream_request(api_url, api_key, model, messages, resp_file, signal
             else:
                 # If a provider rejects stream outright, degrade gracefully to one-shot output.
                 if "stream" in (error_detail or "").lower():
+                    if cancel_requested():
+                        return
                     fallback = make_api_request(api_url, api_key, model, messages)
+                    if cancel_requested():
+                        return
                     if fallback.get("success"):
                         content = fallback.get("content", "")
                         write_stream_event(resp_file, {"type": "start"})
@@ -504,6 +552,8 @@ def make_api_stream_request(api_url, api_key, model, messages, resp_file, signal
         truncated = False
 
         for raw_line in response.iter_lines(decode_unicode=False):
+            if cancel_requested():
+                return
             if isinstance(raw_line, bytes):
                 raw_line = raw_line.decode("utf-8", errors="replace")
             if not raw_line:
@@ -625,7 +675,16 @@ def parse_config_file(config_path):
         "llm_url": "https://api.openai.com/v1/chat/completions",
         "llm_key": "",
         "llm_model": "gpt-5.5",
+        "audio_provider": "elevenlabs",
         "elevenlabs_key": "",
+        "doubao_api_key": "",
+        "doubao_speaker": "",
+        "doubao_language": "zh_mix",
+        "doubao_accent": "default",
+        "doubao_speed_ratio": 1.0,
+        "doubao_pitch_ratio": 1.0,
+        "doubao_volume_ratio": 1.0,
+        "doubao_project_name": "default",
     }
     if not config_path or not os.path.exists(config_path):
         return config
@@ -648,10 +707,38 @@ def parse_config_file(config_path):
                 config["llm_model"] = value
             elif key == "ELEVENLABS_API_KEY":
                 config["elevenlabs_key"] = value
+            elif key == "AUDIO_PROVIDER":
+                config["audio_provider"] = _normalize_audio_provider(value)
+            elif key == "DOUBAO_API_KEY":
+                config["doubao_api_key"] = value
+            elif key == "DOUBAO_SPEAKER":
+                config["doubao_speaker"] = value
+            elif key == "DOUBAO_LANGUAGE":
+                config["doubao_language"] = value
+            elif key == "DOUBAO_ACCENT":
+                config["doubao_accent"] = value
+            elif key == "DOUBAO_SPEED_RATIO":
+                try:
+                    config["doubao_speed_ratio"] = float(value)
+                except Exception:
+                    pass
+            elif key == "DOUBAO_PITCH_RATIO":
+                try:
+                    config["doubao_pitch_ratio"] = float(value)
+                except Exception:
+                    pass
+            elif key == "DOUBAO_VOLUME_RATIO":
+                try:
+                    config["doubao_volume_ratio"] = float(value)
+                except Exception:
+                    pass
+            elif key == "DOUBAO_PROJECT_NAME":
+                config["doubao_project_name"] = value
             # v1.0+ ELEVENLABS_VOICE_ID 已废弃，Voice 由 worker 智能选择
     except Exception as e:
         log(f"解析配置文件失败: {e}")
     
+    config["audio_provider"] = _normalize_audio_provider(config.get("audio_provider"))
     return config
 
 
@@ -964,6 +1051,159 @@ def _trim_audio_text(text):
     return (text or "").strip()
 
 
+def _normalize_audio_provider(value):
+    value = str(value or "").strip().lower()
+    if value in ("doubao", "volcengine", "volc", "byteplus", "豆包", "火山", "火山引擎"):
+        return "doubao"
+    return "elevenlabs"
+
+
+def _normalize_audio_format(value):
+    value = str(value or "").strip().lower().replace("-", "_")
+    if value in ("", "wav"):
+        return "wav"
+    if value in ("mp3", "pcm", "ogg_opus"):
+        return value
+    if value in ("oggopus", "ogg_opus"):
+        return "ogg_opus"
+    return "wav"
+
+
+def _audio_file_extension(format_name):
+    format_name = _normalize_audio_format(format_name)
+    if format_name == "ogg_opus":
+        return "ogg"
+    return format_name
+
+
+def _maybe_decode_base64_audio(value):
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) < 32:
+        return None
+    if text.startswith("data:") and "," in text:
+        text = text.split(",", 1)[1].strip()
+    text = "".join(text.split())
+    if not re.fullmatch(r"[A-Za-z0-9+/=]+", text):
+        return None
+    pad = (-len(text)) % 4
+    if pad:
+        text += "=" * pad
+    try:
+        decoded = base64.b64decode(text, validate=True)
+    except Exception:
+        return None
+    return decoded or None
+
+
+def _extract_audio_blob(data):
+    if isinstance(data, str):
+        decoded = _maybe_decode_base64_audio(data)
+        if decoded is not None:
+            return ("bytes", decoded)
+        if data.startswith(("http://", "https://")):
+            return ("url", data)
+        return None
+
+    if isinstance(data, list):
+        for item in data:
+            candidate = _extract_audio_blob(item)
+            if candidate:
+                return candidate
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    direct_keys = (
+        "audio",
+        "audio_data",
+        "audio_base64",
+        "binary_data",
+        "binary_data_base64",
+        "audio_binary",
+        "base64_audio",
+        "result_audio",
+        "data",
+        "content",
+    )
+    for key in direct_keys:
+        if key not in data:
+            continue
+        candidate = _extract_audio_blob(data.get(key))
+        if candidate:
+            return candidate
+
+    url_keys = ("audio_url", "url", "download_url", "file_url")
+    for key in url_keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return ("url", value)
+
+    nested_keys = ("result", "output", "response", "data")
+    for key in nested_keys:
+        if key in data:
+            candidate = _extract_audio_blob(data.get(key))
+            if candidate:
+                return candidate
+
+    for value in data.values():
+        candidate = _extract_audio_blob(value)
+        if candidate:
+            return candidate
+
+    return None
+
+
+def _extract_error_message(data):
+    if isinstance(data, dict):
+        metadata = data.get("ResponseMetadata") or data.get("response_metadata")
+        if isinstance(metadata, dict):
+            nested_error = metadata.get("Error") or metadata.get("error")
+            if isinstance(nested_error, dict):
+                code = nested_error.get("Code") or nested_error.get("code") or ""
+                message = nested_error.get("Message") or nested_error.get("message") or nested_error.get("Msg") or nested_error.get("msg") or ""
+                if code or message:
+                    return f"{code}: {message}".strip(": ")
+            elif isinstance(nested_error, str) and nested_error.strip():
+                return nested_error.strip()
+        error = data.get("error")
+        if isinstance(error, dict):
+            return (
+                error.get("message")
+                or error.get("msg")
+                or error.get("error")
+                or error.get("detail")
+                or json.dumps(error, ensure_ascii=False)
+            )
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+        for key in ("message", "msg", "detail", "error_message"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        code = data.get("code")
+        if code not in (None, "", 0, "0", "ok", "success"):
+            message = data.get("message") or data.get("msg") or data.get("detail") or ""
+            return f"{code}: {message}" if message else str(code)
+    return None
+
+
+def _response_json_if_any(response):
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    body = (response.text or "").strip()
+    if "json" not in content_type and not body.startswith(("{", "[")):
+        return None
+    try:
+        return response.json()
+    except Exception:
+        try:
+            return json.loads(body)
+        except Exception:
+            return None
+
+
 def _strip_audio_shortcut_prefix(text):
     text = _trim_audio_text(text)
     if text.startswith("11"):
@@ -1023,6 +1263,217 @@ def _voice_record_line(record):
         tags,
         "1" if record.get("available") else "0",
     ])
+
+
+def _doubao_voice_record_line(record):
+    tags = ",".join(_safe_voice_field(tag) for tag in record.get("tags") or [])
+    return "\t".join([
+        _safe_voice_field(record.get("id")),
+        _safe_voice_field(record.get("name")),
+        _safe_voice_field(record.get("language")),
+        _safe_voice_field(record.get("accent")),
+        _safe_voice_field(record.get("source") or "account"),
+        tags,
+        "1" if record.get("available") else "0",
+    ])
+
+
+def _voice_status_is_available(status):
+    status = str(status or "").strip().lower()
+    if not status:
+        return True
+    return status in {
+        "success",
+        "active",
+        "available",
+        "ready",
+        "completed",
+        "complete",
+        "done",
+        "finished",
+        "usable",
+        "true",
+        "1",
+    }
+
+
+def _extract_first_value(raw, keys):
+    if not isinstance(raw, dict):
+        return ""
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value not in (None, "") and not isinstance(value, (dict, list)):
+            return str(value).strip()
+    return ""
+
+
+def _as_text_list(value):
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        out = []
+        for item in value:
+            out.extend(_as_text_list(item))
+        return out
+    if isinstance(value, dict):
+        out = []
+        for item in value.values():
+            out.extend(_as_text_list(item))
+        return out
+    return [part.strip() for part in re.split(r"[,;|/\s]+", str(value)) if part.strip()]
+
+
+def _extract_list_values(raw, keys):
+    if not isinstance(raw, dict):
+        return []
+    out = []
+    for key in keys:
+        if key in raw:
+            out.extend(_as_text_list(raw.get(key)))
+    return out
+
+
+def _normalize_doubao_language_tag(value):
+    value = str(value or "").strip().lower().replace("_", "-")
+    if value in ("zh", "zh-cn", "zh-hans", "cn", "chinese", "mandarin", "putonghua", "zhmix", "zh-mix"):
+        return "zh_mix"
+    if value in ("ja", "jp", "japanese", "ja-jp"):
+        return "ja"
+    if value in ("id", "in", "indonesian", "id-id", "indo"):
+        return "id"
+    if value in ("es", "es-mx", "spanish", "spa", "mx"):
+        return "es"
+    return ""
+
+
+def _normalize_doubao_accent_tag(value):
+    value = str(value or "").strip().lower().replace("_", "-")
+    if value in ("", "default", "standard", "normal", "mandarin", "putonghua", "zh-cn", "普通话"):
+        return "default"
+    if value in ("dongbei", "northeast", "north-east", "东北", "东北话"):
+        return "dongbei"
+    if value in ("shaanxi", "shanxi", "shan-xi", "陕西", "陕西话", "陕北"):
+        return "shaanxi"
+    if value in ("sichuan", "sichuanese", "sichuan-hua", "四川", "四川话", "川普"):
+        return "sichuan"
+    return ""
+
+
+def _unique_nonempty(values):
+    out = []
+    seen = set()
+    for value in values:
+        value = str(value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _infer_doubao_languages_from_id(voice_id):
+    lower = str(voice_id or "").lower()
+    if lower.startswith("ja_") or "_ja_" in lower:
+        return ["ja"]
+    if lower.startswith("id_") or "_id_" in lower:
+        return ["id"]
+    if lower.startswith("es_") or "_es_" in lower:
+        return ["es"]
+    return ["zh_mix"]
+
+
+def _doubao_resource_id_for_voice(voice_id, requested=""):
+    requested = str(requested or "").strip()
+    if requested:
+        return requested
+    voice_id = str(voice_id or "").strip()
+    if voice_id.startswith("S_"):
+        return DOUBAO_CLONE_RESOURCE_ID
+    return DOUBAO_TTS_RESOURCE_ID
+
+
+def _build_doubao_voice_record(raw):
+    if not isinstance(raw, dict):
+        return None
+    voice_id = _extract_first_value(raw, ("SpeakerID", "speaker_id", "speakerId", "speakerID", "VoiceID", "voice_id", "voiceId", "id"))
+    if not voice_id:
+        return None
+    name = _extract_first_value(raw, ("SpeakerName", "speaker_name", "speakerName", "Name", "name", "Alias", "alias"))
+    status = _extract_first_value(raw, ("State", "state", "Status", "status", "TrainStatus", "train_status"))
+    demo_audio = _extract_first_value(raw, ("DemoAudio", "demo_audio", "demoAudio"))
+    is_activable = raw.get("IsActivable")
+    if isinstance(is_activable, str):
+        is_activable = is_activable.strip().lower() in ("1", "true", "yes", "active")
+    available = _voice_status_is_available(status)
+    if is_activable is True and not status:
+        available = True
+    tags = []
+    if status:
+        tags.append(f"state:{status}")
+    if demo_audio:
+        tags.append("demo")
+    if raw.get("Version"):
+        tags.append(f"version:{raw.get('Version')}")
+    if raw.get("IsActivable") is not None:
+        tags.append("activable" if bool(is_activable) else "inactive")
+    languages = _unique_nonempty(
+        _normalize_doubao_language_tag(value)
+        for value in _extract_list_values(raw, (
+            "Language", "language", "Lang", "lang", "Languages", "languages",
+            "SupportedLanguages", "supported_languages", "OutputLanguage", "outputLanguage",
+            "output_language", "Locale", "locale",
+        ))
+    )
+    accents = _unique_nonempty(
+        _normalize_doubao_accent_tag(value)
+        for value in _extract_list_values(raw, (
+            "Accent", "accent", "Dialect", "dialect", "Dialects", "dialects",
+            "SupportedDialects", "supported_dialects", "Accents", "accents",
+        ))
+    )
+    if not languages:
+        languages = _infer_doubao_languages_from_id(voice_id)
+        tags.append("cap:inferred")
+    if not accents:
+        accents = ["default"]
+    for language in languages:
+        tags.append(f"lang:{language}")
+    for accent in accents:
+        tags.append(f"accent:{accent}")
+    tags.extend(DOUBAO_CONTROL_TAGS)
+    tags.append(f"resource:{_doubao_resource_id_for_voice(voice_id)}")
+    return {
+        "id": voice_id,
+        "name": name or voice_id,
+        "language": languages[0] if len(languages) == 1 else "",
+        "accent": accents[0] if len(accents) == 1 else "",
+        "source": "account",
+        "available": bool(available),
+        "tags": _unique_nonempty(tags),
+    }
+
+
+def _collect_doubao_voice_records(data):
+    candidates = []
+    seen = set()
+
+    def visit(node):
+        if isinstance(node, dict):
+            record = _build_doubao_voice_record(node)
+            if record and record["id"] not in seen:
+                seen.add(record["id"])
+                candidates.append(record)
+            for value in node.values():
+                if isinstance(value, (dict, list)):
+                    visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                if isinstance(value, (dict, list)):
+                    visit(value)
+
+    visit(data)
+    return candidates
 
 
 def _labels_text(labels):
@@ -1351,12 +1802,23 @@ def parse_audio_request_payload(raw_text):
                 gender = str(data.get("gender") or "").strip().lower()
                 if gender not in ("male", "female"):
                     gender = _infer_gender_from_text(" ".join([voice_style, performance_prompt]))
+                provider = _normalize_audio_provider(data.get("provider") or data.get("service") or data.get("vendor") or "")
+                audio_format = _normalize_audio_format(data.get("format") or "wav")
 
                 return {
                     "structured": True,
+                    "provider": provider,
                     "mode": mode,
                     "track_name": _trim_audio_text(data.get("track_name") or ""),
                     "prompt": _trim_audio_text(data.get("prompt") or data.get("description") or ""),
+                    "text_prompt": _trim_audio_text(data.get("text_prompt") or ""),
+                    "speaker": _trim_audio_text(data.get("speaker") or data.get("voice") or data.get("voice_id") or ""),
+                    "speaker_name": _trim_audio_text(data.get("speaker_name") or data.get("voice_name") or ""),
+                    "language": _trim_audio_text(data.get("language") or data.get("lang") or ""),
+                    "accent": _trim_audio_text(data.get("accent") or data.get("dialect") or ""),
+                    "speed_ratio": data.get("speed_ratio") if data.get("speed_ratio") is not None else data.get("speed"),
+                    "pitch_ratio": data.get("pitch_ratio") if data.get("pitch_ratio") is not None else data.get("pitch"),
+                    "volume_ratio": data.get("volume_ratio") if data.get("volume_ratio") is not None else data.get("volume"),
                     "gender": gender,
                     "voice_style": voice_style,
                     "performance": performance,
@@ -1371,6 +1833,9 @@ def parse_audio_request_payload(raw_text):
                     "spoken_text": _trim_audio_text(data.get("spoken_text") or data.get("text") or ""),
                     "source_text": _trim_audio_text(data.get("source_text") or ""),
                     "output_dir": _trim_audio_text(data.get("output_dir") or ""),
+                    "format": audio_format,
+                    "model": _trim_audio_text(data.get("model") or data.get("audio_model") or ""),
+                    "resource_id": _trim_audio_text(data.get("resource_id") or data.get("app_id") or ""),
                     "semantic_parse": bool(data.get("semantic_parse")),
                 }
         except Exception as e:
@@ -1393,9 +1858,12 @@ def parse_audio_request_payload(raw_text):
         gender = _infer_gender_from_text(voice_style)
         return {
             "structured": False,
+            "provider": "elevenlabs",
             "mode": "vox",
             "track_name": "",
             "prompt": "",
+            "text_prompt": "",
+            "speaker": "",
             "gender": gender,
             "voice_style": voice_style,
             "performance": "",
@@ -1410,14 +1878,20 @@ def parse_audio_request_payload(raw_text):
             "spoken_text": spoken_text,
             "source_text": text,
             "output_dir": "",
+            "format": "wav",
+            "model": "",
+            "resource_id": "",
             "semantic_parse": bool(explicit_vox),
         }
 
     return {
         "structured": False,
+        "provider": "elevenlabs",
         "mode": "sfx",
         "track_name": "",
         "prompt": text,
+        "text_prompt": text,
+        "speaker": "",
         "gender": "",
         "voice_style": "",
         "performance": "",
@@ -1432,6 +1906,9 @@ def parse_audio_request_payload(raw_text):
         "spoken_text": "",
         "source_text": text,
         "output_dir": "",
+        "format": "wav",
+        "model": "",
+        "resource_id": "",
         "semantic_parse": False,
     }
 
@@ -1444,6 +1921,388 @@ def prepend_audio_lines(result, lines):
     if clean_lines:
         result["content"] = "\n".join(clean_lines + [content])
     return result
+
+
+def _write_binary_file(path, data):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+
+def _response_body_snippet(response, limit=500):
+    try:
+        text = response.text or ""
+    except Exception:
+        text = ""
+    text = text.strip()
+    if len(text) > limit:
+        text = text[:limit]
+    return text
+
+
+def _save_doubao_response(response, output_path):
+    if response.status_code != 200:
+        detail = _response_body_snippet(response)
+        return False, f"火山引擎豆包错误 {response.status_code}: {detail}"
+
+    parsed = _response_json_if_any(response)
+    candidate = _extract_audio_blob(parsed) if parsed is not None else None
+    if not candidate:
+        candidate = _extract_audio_blob(response.text)
+
+    if candidate:
+        kind, value = candidate
+        if kind == "bytes":
+            _write_binary_file(output_path, value)
+            return True, output_path
+        if kind == "url":
+            try:
+                download = requests.get(value, timeout=DOUBAO_TIMEOUT)
+                if download.status_code != 200:
+                    detail = _response_body_snippet(download)
+                    return False, f"下载豆包音频失败 {download.status_code}: {detail}"
+                _write_binary_file(output_path, download.content)
+                return True, output_path
+            except requests.exceptions.Timeout:
+                return False, f"下载豆包音频超时（{DOUBAO_TIMEOUT}秒）"
+            except requests.exceptions.RequestException as e:
+                return False, f"下载豆包音频网络错误: {e}"
+            except Exception as e:
+                return False, f"下载豆包音频失败: {e}"
+
+    if parsed is not None:
+        error = _extract_error_message(parsed)
+        if error:
+            return False, f"火山引擎豆包返回错误: {error}"
+
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    if response.content and "json" not in content_type and not (response.text or "").strip().startswith(("{", "[")):
+        _write_binary_file(output_path, response.content)
+        return True, output_path
+
+    detail = _response_body_snippet(response)
+    if detail:
+        return False, f"未找到音频内容: {detail}"
+    return False, "豆包响应为空"
+
+
+def _float_or_default(value, default=1.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _ratio_to_rate(value):
+    ratio = max(0.5, min(2.0, _float_or_default(value, 1.0)))
+    return int(round(max(-50, min(100, (ratio - 1.0) * 100))))
+
+
+def _pitch_ratio_to_pitch(value):
+    ratio = max(0.5, min(2.0, _float_or_default(value, 1.0)))
+    if ratio >= 1.0:
+        pitch = (ratio - 1.0) * 12
+    else:
+        pitch = (ratio - 1.0) * 24
+    return int(round(max(-12, min(12, pitch))))
+
+
+def _doubao_explicit_language(language):
+    language = _normalize_doubao_language_tag(language)
+    return {
+        "ja": "ja",
+        "id": "id",
+        "es": "es-mx",
+    }.get(language, "")
+
+
+def _doubao_explicit_dialect(language, accent):
+    language = _normalize_doubao_language_tag(language) or "zh_mix"
+    accent = _normalize_doubao_accent_tag(accent)
+    if language != "zh_mix" or accent in ("", "default"):
+        return ""
+    return accent
+
+
+def _parse_json_objects_from_text(text):
+    text = str(text or "").strip()
+    if not text:
+        return []
+    cleaned_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped == "[DONE]":
+            continue
+        if stripped.startswith("data:"):
+            stripped = stripped[5:].strip()
+        cleaned_lines.append(stripped)
+    text = "\n".join(cleaned_lines).strip()
+    if not text:
+        return []
+
+    decoder = json.JSONDecoder()
+    index = 0
+    objects = []
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        try:
+            obj, index = decoder.raw_decode(text, index)
+            objects.append(obj)
+        except Exception:
+            objects = []
+            break
+    if objects:
+        return objects
+
+    for line in cleaned_lines:
+        try:
+            objects.append(json.loads(line))
+        except Exception:
+            pass
+    return objects
+
+
+def _save_doubao_tts_response(response, output_path):
+    if response.status_code != 200:
+        detail = _response_body_snippet(response)
+        logid = response.headers.get("X-Tt-Logid") or response.headers.get("X-Tt-LogId") or ""
+        suffix = f" logid={logid}" if logid else ""
+        return False, f"火山引擎豆包语音合成错误 {response.status_code}: {detail}{suffix}"
+
+    objects = _parse_json_objects_from_text(response.text)
+    audio_chunks = []
+    errors = []
+    for obj in objects:
+        if isinstance(obj, dict):
+            code = obj.get("code")
+            if code not in (None, "", 0, "0", 20000000, "20000000"):
+                errors.append(_extract_error_message(obj) or str(code))
+        candidate = _extract_audio_blob(obj)
+        if not candidate:
+            continue
+        kind, value = candidate
+        if kind == "bytes":
+            audio_chunks.append(value)
+        elif kind == "url":
+            try:
+                download = requests.get(value, timeout=DOUBAO_TIMEOUT)
+                if download.status_code != 200:
+                    return False, f"下载豆包音频失败 {download.status_code}: {_response_body_snippet(download)}"
+                audio_chunks.append(download.content)
+            except requests.exceptions.RequestException as e:
+                return False, f"下载豆包音频网络错误: {e}"
+
+    if audio_chunks:
+        _write_binary_file(output_path, b"".join(audio_chunks))
+        return True, output_path
+
+    if errors:
+        return False, "；".join(errors)
+
+    return _save_doubao_response(response, output_path)
+
+
+def _make_doubao_vox_request(api_key, audio_req, output_path, format_name, text_prompt, speaker):
+    if not speaker:
+        return {"success": False, "error": "请先选择豆包语音合成音色"}
+
+    audio_params = {
+        "format": format_name,
+        "sample_rate": 24000,
+    }
+    speech_rate = _ratio_to_rate(audio_req.get("speed_ratio"))
+    loudness_rate = _ratio_to_rate(audio_req.get("volume_ratio"))
+    pitch = _pitch_ratio_to_pitch(audio_req.get("pitch_ratio"))
+    if speech_rate:
+        audio_params["speech_rate"] = speech_rate
+    if loudness_rate:
+        audio_params["loudness_rate"] = loudness_rate
+
+    language = _trim_audio_text(audio_req.get("language") or "zh_mix")
+    accent = _trim_audio_text(audio_req.get("accent") or "default")
+    additions = {}
+    explicit_language = _doubao_explicit_language(language)
+    explicit_dialect = _doubao_explicit_dialect(language, accent)
+    if explicit_language:
+        additions["explicit_language"] = explicit_language
+    if explicit_dialect:
+        additions["explicit_dialect"] = explicit_dialect
+
+    req_params = {
+        "text": text_prompt,
+        "speaker": speaker,
+        "audio_params": audio_params,
+    }
+    model = _trim_audio_text(audio_req.get("model") or "")
+    if model:
+        req_params["model"] = model
+    if additions:
+        req_params["additions"] = json.dumps(additions, ensure_ascii=False)
+    if pitch:
+        req_params["post_process"] = {"pitch": pitch}
+
+    resource_id = _doubao_resource_id_for_voice(speaker, audio_req.get("resource_id") or "")
+    payload = {"req_params": req_params}
+    headers = {
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "X-Api-Key": api_key,
+        "X-Api-Resource-Id": resource_id,
+        "X-Api-Request-Id": str(uuid.uuid4()),
+    }
+
+    try:
+        response = requests.post(
+            DOUBAO_TTS_ENDPOINT,
+            headers=headers,
+            json=payload,
+            timeout=DOUBAO_TIMEOUT,
+        )
+        saved, result = _save_doubao_tts_response(response, output_path)
+        if not saved:
+            return {"success": False, "error": result}
+        return {"success": True, "content": result}
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": f"火山引擎豆包语音合成超时（{DOUBAO_TIMEOUT}秒）"}
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "error": f"火山引擎豆包语音合成网络错误: {e}"}
+    except Exception as e:
+        return {"success": False, "error": f"火山引擎豆包语音合成失败: {e}"}
+
+
+def _make_doubao_sfx_request(api_key, audio_req, output_path, format_name, text_prompt):
+    audio_config = {"format": format_name}
+    speech_rate = _ratio_to_rate(audio_req.get("speed_ratio"))
+    loudness_rate = _ratio_to_rate(audio_req.get("volume_ratio"))
+    pitch_rate = _pitch_ratio_to_pitch(audio_req.get("pitch_ratio"))
+    if speech_rate:
+        audio_config["speech_rate"] = speech_rate
+    if loudness_rate:
+        audio_config["loudness_rate"] = loudness_rate
+    if pitch_rate:
+        audio_config["pitch_rate"] = pitch_rate
+
+    payload = {
+        "model": _trim_audio_text(audio_req.get("model") or DOUBAO_DEFAULT_MODEL),
+        "text_prompt": text_prompt,
+        "audio_config": audio_config,
+    }
+    speaker = _trim_audio_text(audio_req.get("speaker") or audio_req.get("voice_id") or "")
+    if speaker:
+        payload["speaker"] = speaker
+
+    headers = {
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "X-Api-Key": api_key,
+        "X-Api-Request-Id": str(uuid.uuid4()),
+    }
+
+    try:
+        response = requests.post(
+            DOUBAO_AUDIO_ENDPOINT,
+            headers=headers,
+            json=payload,
+            timeout=DOUBAO_TIMEOUT,
+        )
+        saved, result = _save_doubao_response(response, output_path)
+        if not saved:
+            return {"success": False, "error": result}
+        return {"success": True, "content": result}
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": f"火山引擎豆包音频生成超时（{DOUBAO_TIMEOUT}秒）"}
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "error": f"火山引擎豆包音频生成网络错误: {e}"}
+    except Exception as e:
+        return {"success": False, "error": f"火山引擎豆包音频生成失败: {e}"}
+
+
+def make_doubao_audio_request(api_key, audio_req, output_dir=None):
+    output_dir = _safe_output_dir(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    mode = str(audio_req.get("mode") or "sfx").strip().lower()
+    format_name = _normalize_audio_format(audio_req.get("format") or "wav")
+    file_ext = _audio_file_extension(format_name)
+    timestamp = _audio_timestamp()
+    prefix = "doubao_vox" if mode == "vox" else "doubao_sfx"
+    output_path = os.path.join(output_dir, f"{prefix}_{timestamp}.{file_ext}")
+
+    if mode == "vox":
+        speaker = _trim_audio_text(audio_req.get("speaker") or audio_req.get("voice_id") or "")
+        text_prompt = _trim_audio_text(audio_req.get("text_prompt") or audio_req.get("spoken_text") or audio_req.get("prompt") or audio_req.get("source_text") or "")
+        if not text_prompt:
+            return {"success": False, "error": "豆包语音合成台词为空"}
+        return _make_doubao_vox_request(api_key, audio_req, output_path, format_name, text_prompt, speaker)
+
+    text_prompt = _trim_audio_text(audio_req.get("text_prompt") or audio_req.get("prompt") or audio_req.get("source_text") or "")
+    if not text_prompt:
+        return {"success": False, "error": "豆包音频生成描述为空"}
+    return _make_doubao_sfx_request(api_key, audio_req, output_path, format_name, text_prompt)
+
+
+def make_doubao_voices_request(api_key):
+    if not api_key:
+        return {"success": False, "error": "请先填写豆包 API Key"}
+
+    collected = []
+    seen_ids = set()
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-Api-Key": api_key,
+    }
+    candidate_urls = [
+        "https://openspeech.bytedance.com/api/v3/tts/speakers",
+        "https://openspeech.bytedance.com/api/v3/tts/list_speakers",
+    ]
+
+    for url in candidate_urls:
+        try:
+            response = requests.get(url, headers=headers, timeout=VOICE_LIST_TIMEOUT)
+        except Exception:
+            continue
+        if response.status_code != 200:
+            continue
+        data = _response_json_if_any(response)
+        if not isinstance(data, (dict, list)):
+            continue
+        for record in _collect_doubao_voice_records(data):
+            if not record or not record.get("available"):
+                continue
+            if record["id"] in seen_ids:
+                continue
+            seen_ids.add(record["id"])
+            collected.append(record)
+
+    for voice in DOUBAO_BUILTIN_VOICES:
+        tags = _unique_nonempty(list(voice.get("tags") or []) + list(DOUBAO_CONTROL_TAGS) + [f"resource:{DOUBAO_TTS_RESOURCE_ID}"])
+        record = {
+            "id": voice.get("id") or "",
+            "name": voice.get("name") or voice.get("id") or "",
+            "language": "",
+            "accent": "",
+            "source": "official",
+            "available": True,
+            "tags": tags,
+        }
+        if record["id"] and record["id"] not in seen_ids:
+            seen_ids.add(record["id"])
+            collected.append(record)
+
+    if not collected:
+        return {"success": False, "error": "没有可用豆包音色"}
+
+    source_note = "，已包含官方常用音色"
+    return {
+        "success": True,
+        "content": "\n".join(_doubao_voice_record_line(record) for record in collected),
+        "count": len(collected),
+        "message": f"已刷新 {len(collected)} 条豆包音色{source_note}",
+    }
 
 
 def translate_to_english(api_url, api_key, model, chinese_text):
@@ -1980,6 +2839,8 @@ def write_response(resp_file, signal_file, result):
     v1.0+: 成功时直接写入提取后的 content（纯文本），Lua 不再需要解析 JSON
     v1.0+: 支持音频文件路径返回
     """
+    if cancel_requested():
+        return False
     try:
         if result.get("success"):
             # 成功：直接写入提取后的 content（纯文本）
@@ -2010,9 +2871,10 @@ def write_response(resp_file, signal_file, result):
 
 
 def main():
+    global CANCEL_FILE
     if len(sys.argv) < 8:
         emergency_log(f"参数不足: 需要 7 个，实际 {len(sys.argv)-1}")
-        print("用法: rai_http_worker_v2.py <request_id> <api_url> <key_file> <model> <msg_file> <resp_file> <signal_file> [mode]", file=sys.stderr)
+        print("用法: rai_http_worker_v2.py <request_id> <api_url> <key_file> <model> <msg_file> <resp_file> <signal_file> [mode] [cancel_file]", file=sys.stderr)
         sys.exit(1)
     
     request_id = sys.argv[1]
@@ -2023,6 +2885,9 @@ def main():
     resp_file = sys.argv[6]
     signal_file = sys.argv[7]
     mode = sys.argv[8] if len(sys.argv) > 8 else "llm"  # v1.0+ 新增 mode 参数
+    CANCEL_FILE = sys.argv[9] if len(sys.argv) > 9 else ""
+    if cancel_requested():
+        return
     
     # 读取 API Key 文件内容
     try:
@@ -2037,45 +2902,71 @@ def main():
         os.makedirs(os.path.dirname(resp_file) or ".", exist_ok=True)
     except Exception as e:
         emergency_log(f"创建临时目录失败: {e}")
+
+    if cancel_requested():
+        return
     
     if mode == "elevenlabs_voices":
+        if cancel_requested():
+            return
         result = make_elevenlabs_voices_request(api_key)
+        if cancel_requested():
+            return
+        write_response(resp_file, signal_file, result)
+        return
+
+    if mode == "doubao_voices":
+        if cancel_requested():
+            return
+        result = make_doubao_voices_request(api_key)
+        if cancel_requested():
+            return
         write_response(resp_file, signal_file, result)
         return
 
     if mode == "models":
+        if cancel_requested():
+            return
         result = make_models_request(api_url, api_key)
+        if cancel_requested():
+            return
         write_response(resp_file, signal_file, result)
         return
 
     if mode == "llm_stream":
+        if cancel_requested():
+            return
         messages, error = read_messages(msg_file)
         if error:
             fail_stream(resp_file, signal_file, error)
             return
 
+        if cancel_requested():
+            return
         make_api_stream_request(api_url, api_key, model, messages, resp_file, signal_file)
         return
 
-    if mode == "elevenlabs":
-        # v1.0+ ElevenLabs 智能分流模式
-        # api_url 参数在 elevenlabs 模式下是 config.txt 路径
+    if mode == "elevenlabs" or mode == "audio":
+        # v1.0+ 音频分流模式
+        # api_url 参数在音频模式下是 config.txt 路径
         config_path = api_url
         
         # 读取完整配置（用于翻译和 voice_id）
         config = parse_config_file(config_path)
         
-        # 从 key_file 读取 ElevenLabs API Key（Lua 写入的临时文件）
+        # 从 key_file 读取音频 API Key（Lua 写入的临时文件）
         try:
-            elevenlabs_key = read_text_file_smart(key_file).strip()
+            audio_api_key = read_text_file_smart(key_file).strip()
         except Exception as e:
             emergency_log(f"读取 API Key 文件失败: {e}")
             write_response(resp_file, signal_file, {"success": False, "error": f"读取 API Key 失败: {e}"})
             sys.exit(1)
         
-        if not elevenlabs_key:
-            write_response(resp_file, signal_file, {"success": False, "error": "ElevenLabs API Key 为空"})
+        if not audio_api_key:
+            write_response(resp_file, signal_file, {"success": False, "error": "音频 API Key 为空"})
             sys.exit(1)
+        if cancel_requested():
+            return
         
         # 读取文本内容
         try:
@@ -2089,8 +2980,38 @@ def main():
             sys.exit(1)
         
         audio_req = parse_audio_request_payload(text_content)
+        provider = _normalize_audio_provider(audio_req.get("provider") or model or config.get("audio_provider") or "")
+        if mode == "elevenlabs":
+            provider = "elevenlabs"
+        audio_req["provider"] = provider
+        elevenlabs_key = audio_api_key
+        if cancel_requested():
+            return
         
-        if audio_req["mode"] == "vox":
+        if provider == "doubao":
+            output_dir = _safe_output_dir(audio_req.get("output_dir"))
+            if audio_req["mode"] == "vox":
+                audio_req["speaker"] = _trim_audio_text(audio_req.get("speaker") or config.get("doubao_speaker") or "")
+                if not audio_req.get("speaker"):
+                    write_response(resp_file, signal_file, {"success": False, "error": "豆包语音合成音色为空，请先在服务商配置中刷新并选择音色"})
+                    sys.exit(1)
+            result = make_doubao_audio_request(audio_api_key, audio_req, output_dir=output_dir)
+            if cancel_requested():
+                return
+            prompt_preview = audio_req.get("text_prompt") or audio_req.get("prompt") or audio_req.get("spoken_text") or audio_req.get("source_text") or ""
+            speaker_label = audio_req.get("speaker_name") or audio_req.get("speaker") or ""
+            language_label = audio_req.get("language") or ""
+            accent_label = audio_req.get("accent") or ""
+            result = prepend_audio_lines(result, [
+                "服务: 火山引擎豆包",
+                "类型: " + ("语音合成" if audio_req["mode"] == "vox" else "音频生成"),
+                f"音色: {speaker_label}" if audio_req["mode"] == "vox" and speaker_label else "",
+                f"语言/口音: {language_label} / {accent_label}" if audio_req["mode"] == "vox" and language_label else "",
+                f"语速/音调/音量: {audio_req.get('speed_ratio') or 1.0} / {audio_req.get('pitch_ratio') or 1.0} / {audio_req.get('volume_ratio') or 1.0}" if audio_req["mode"] == "vox" else "",
+                f"提示: {prompt_preview}",
+                f"保存目录: {output_dir}",
+            ])
+        elif audio_req["mode"] == "vox":
             llm_url = config.get("llm_url")
             llm_key = config.get("llm_key")
             llm_model = config.get("llm_model")
@@ -2154,7 +3075,7 @@ def main():
             }
             
             if not clean_text:
-                write_response(resp_file, signal_file, {"success": False, "error": "VOX 台词为空，请填写要朗读的内容"})
+                write_response(resp_file, signal_file, {"success": False, "error": "语音合成台词为空，请填写要朗读的内容"})
                 sys.exit(1)
             
             preferred_gender = audio_req.get("gender") if audio_req.get("gender") in ("male", "female") else ""
@@ -2190,8 +3111,10 @@ def main():
                 voice_style=audio_req.get("voice_style") or "",
                 performance_data=performance_data,
             )
+            if cancel_requested():
+                return
             result = prepend_audio_lines(result, [
-                "类型: VOX",
+                "类型: 语音合成",
                 f"声线ID: {voice_id}",
                 f"声音: {preference or '默认'}",
                 f"语气: {performance or '默认'}",
@@ -2204,7 +3127,7 @@ def main():
             sfx_prompt = audio_req.get("prompt") or audio_req.get("source_text") or ""
             output_dir = _safe_output_dir(audio_req.get("output_dir"))
             if not sfx_prompt:
-                write_response(resp_file, signal_file, {"success": False, "error": "SFX 描述为空，请填写要生成的音效"})
+                write_response(resp_file, signal_file, {"success": False, "error": "音频生成描述为空，请填写要生成的音效"})
                 sys.exit(1)
             
             if _has_chinese(sfx_prompt):
@@ -2224,8 +3147,10 @@ def main():
                 
                 log(f"中文提示词 '{sfx_prompt}' 翻译为: '{translated}'")
                 result = make_elevenlabs_sound_request(elevenlabs_key, translated, output_dir=output_dir)
+                if cancel_requested():
+                    return
                 result = prepend_audio_lines(result, [
-                    "类型: SFX",
+                    "类型: 音频生成",
                     f"描述: {sfx_prompt}",
                     f"英文提示词: {translated}",
                     f"保存目录: {output_dir}",
@@ -2233,8 +3158,10 @@ def main():
             else:
                 # 英文直接调用 Sound Effects API
                 result = make_elevenlabs_sound_request(elevenlabs_key, sfx_prompt, output_dir=output_dir)
+                if cancel_requested():
+                    return
                 result = prepend_audio_lines(result, [
-                    "类型: SFX",
+                    "类型: 音频生成",
                     f"描述: {sfx_prompt}",
                     f"保存目录: {output_dir}",
                 ])
@@ -2248,9 +3175,13 @@ def main():
             sys.exit(1)
         
         # 执行 API 请求
+        if cancel_requested():
+            return
         result = make_api_request(api_url, api_key, model, messages)
     
     # 写入响应并发送信号
+    if cancel_requested():
+        return
     write_response(resp_file, signal_file, result)
 
 

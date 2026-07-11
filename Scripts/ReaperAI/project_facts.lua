@@ -26,6 +26,7 @@ function ProjectFacts.create(deps)
   }
 
   local ITEM_ENDPOINTS = {
+    ["item/set_color"] = true,
     ["item/fade"] = true,
     ["item/set_fade"] = true,
     ["item/fade_shape"] = true,
@@ -45,6 +46,20 @@ function ProjectFacts.create(deps)
   local function truthy(value)
     value = lower(value)
     return value == "true" or value == "1" or value == "yes" or value == "on" or value == "selected"
+  end
+
+  local function selected_region_token(value)
+    value = lower(value):gsub("%s+", "_")
+    return value == "selected" or value == "selection" or value == "current" or
+      value == "selected_region" or value == "selected_regions" or value == "current_region" or
+      value == "选中" or value == "已选中" or value == "当前选中" or value == "选中的region" or
+      value == "选中的_region" or value == "选中的区域"
+  end
+
+  local function keep_selected_region(value)
+    value = lower(value)
+    return value == "true" or value == "1" or value == "yes" or value == "on" or
+      value == "keep" or value == "preserve" or value == "except"
   end
 
   local function has_value(params, keys)
@@ -326,7 +341,7 @@ function ProjectFacts.create(deps)
   end
 
   local function validate_region_step(op, step_index, endpoint, params, snapshot)
-    if endpoint ~= "region/delete" and endpoint ~= "region/batch_rename" and endpoint ~= "export/batch_regions" then return end
+    if endpoint ~= "region/delete" and endpoint ~= "region/set_color" and endpoint ~= "region/batch_rename" and endpoint ~= "export/batch_regions" then return end
     if (snapshot.region_count or 0) <= 0 then
       add_fact_question(op, fact_question(step_index, endpoint, "当前工程没有 Region，不能执行这个 Region 操作。", "no regions in project", {
         fields = { "region_target" },
@@ -334,7 +349,19 @@ function ProjectFacts.create(deps)
       }))
       return
     end
-    if endpoint ~= "region/delete" then return end
+    if endpoint ~= "region/delete" and endpoint ~= "region/set_color" then return end
+
+    local target = trim(params.index or params.id or params.region or params.target or "")
+    local requires_selected_region = false
+    if requires_selected_region then
+      if (snapshot.selected_region_count or 0) <= 0 then
+        add_fact_question(op, fact_question(step_index, endpoint, "当前没有检测到可推断的选中 Region。请先点选 Region（通常会形成同范围时间选区），或说明 Region 编号。", "selected region target is empty", {
+          fields = { "region_target" },
+          placeholder = "选中 Region，或输入 R 编号/范围",
+        }))
+      end
+      return
+    end
 
     local name = trim(params.name or params.match or "")
     if name ~= "" and name_count(snapshot, "region", name, true) <= 0 then
@@ -555,6 +582,15 @@ function ProjectFacts.create(deps)
       item_count = snapshot.item_count or 0,
       selected_track_count = snapshot.selected_track_count or 0,
       selected_item_count = snapshot.selected_item_count or 0,
+      selected_region_count = snapshot.selected_region_count or 0,
+      selected_region_indices = snapshot.selected_region_indices or {},
+      selected_region_source = snapshot.selected_region_source or "",
+      current_item_count = #(snapshot.current_item_indices or {}),
+      time_selection_item_count = #(snapshot.time_selection_item_indices or {}),
+      current_marker_count = #(snapshot.current_marker_indices or {}),
+      time_selection_marker_count = #(snapshot.time_selection_marker_indices or {}),
+      current_region_count = #(snapshot.current_region_indices or {}),
+      time_selection_region_count = #(snapshot.time_selection_region_indices or {}),
       marker_count = snapshot.marker_count or 0,
       region_count = snapshot.region_count or 0,
     }

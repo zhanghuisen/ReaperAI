@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>nul
-title ReaperAI v1.0.4 - Config Wizard
+title ReaperAI v1.0.5 - Config Wizard
 
 set "PYTHON_VERSION=3.11.9"
 set "SCRIPT_DIR=%~dp0"
@@ -33,7 +33,7 @@ if /i "%~1"=="--self-test" (
 if exist "%LOG_FILE%" del /f /q "%LOG_FILE%" >nul 2>nul
 
 echo ============================================
-echo   ReaperAI v1.0.4 - Config Wizard Launcher
+echo   ReaperAI v1.0.5 - Config Wizard Launcher
 echo ============================================
 echo.
 

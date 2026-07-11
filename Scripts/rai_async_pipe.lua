@@ -25,6 +25,80 @@ local function file_exists(path)
   return false
 end
 
+local function read_pid_file(path)
+  if not path or path == "" then return nil end
+  local f = io.open(path, "r")
+  if not f then return nil end
+  local content = f:read("*a") or ""
+  f:close()
+  local pid = tostring(content):match("(%d+)")
+  return pid
+end
+
+local function write_cancel_file(path)
+  if not path or path == "" then return end
+  local f = io.open(path, "w")
+  if not f then return end
+  f:write("cancelled")
+  f:close()
+end
+
+local function ps_quote(value)
+  return "'" .. tostring(value or ""):gsub("'", "''") .. "'"
+end
+
+local function kill_worker_by_request_id(request_id)
+  request_id = tostring(request_id or "")
+  if request_id == "" then return false end
+  if not (os.getenv("OS") and tostring(os.getenv("OS")):lower():find("windows", 1, true)) then return false end
+  local temp_dir = os.getenv("TEMP") or "C:\\Temp"
+  local script_path = temp_dir .. "\\rai_kill_" .. request_id:gsub("[^%w_%-]", "_") .. ".ps1"
+  local f = io.open(script_path, "w")
+  if not f then return false end
+  f:write("$needle = " .. ps_quote(request_id) .. "\n")
+  f:write("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($needle) -and $_.Name -like 'python*.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\n")
+  f:close()
+  local cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' .. script_path .. '" >NUL 2>NUL'
+  local ok = pcall(os.execute, cmd)
+  pcall(function() os.remove(script_path) end)
+  return ok == true
+end
+
+local function wait_for_pid_file(path, timeout_ms)
+  local pid = read_pid_file(path)
+  if pid then return pid end
+  local deadline = ((reaper.time_precise and reaper.time_precise()) or os.clock()) + ((tonumber(timeout_ms) or 0) / 1000)
+  while (((reaper.time_precise and reaper.time_precise()) or os.clock()) < deadline) do
+    if reaper.Sleep then reaper.Sleep(50) end
+    pid = read_pid_file(path)
+    if pid then return pid end
+  end
+  return nil
+end
+
+local function kill_worker_pid(pid)
+  pid = tostring(pid or ""):match("(%d+)")
+  if not pid or pid == "" then return false end
+  if os.getenv("OS") and tostring(os.getenv("OS")):lower():find("windows", 1, true) then
+    local cmd = "taskkill /PID " .. pid .. " /T /F >NUL 2>NUL"
+    local ok = pcall(os.execute, cmd)
+    return ok == true
+  end
+  return false
+end
+
+local function terminate_request_worker(req, wait_ms)
+  if not req then return false end
+  write_cancel_file(req.cancel_file)
+  local pid = read_pid_file(req.pid_file)
+  if not pid and wait_ms and wait_ms > 0 then
+    pid = wait_for_pid_file(req.pid_file, wait_ms)
+  end
+  local killed = pid and kill_worker_pid(pid) or false
+  local killed_by_scan = kill_worker_by_request_id(req.id)
+  return killed or killed_by_scan
+end
+
 local function json_string_field(line, key)
   line = tostring(line or "")
   local _, pos = line:find('"' .. tostring(key or "") .. '"%s*:%s*"')
@@ -353,7 +427,8 @@ end
 function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, mode, on_stream)
   -- v1.0+ 新增 mode 参数：
   --   mode 省略或为 "llm": 调用 LLM API (默认)
-  --   mode 为 "elevenlabs": 调用 ElevenLabs API 生成音频
+  --   mode 为 "elevenlabs" 或 "audio": 调用音频 worker 生成音频
+  --   mode 为 "doubao_voices": 调用音频 worker 检测豆包账户音色
   
   mode = mode or "llm"
   local is_stream = mode == "llm_stream"
@@ -365,6 +440,8 @@ function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, 
   local resp_file = temp_dir .. "\\rai_resp_" .. request_id .. ".json"
   local signal_file = temp_dir .. "\\rai_signal_" .. request_id .. ".txt"
   local key_file = temp_dir .. "\\rai_key_" .. request_id .. ".txt"  -- 安全：key不放命令行
+  local pid_file = temp_dir .. "\\rai_pid_" .. request_id .. ".txt"
+  local cancel_file = temp_dir .. "\\rai_cancel_" .. request_id .. ".flag"
   
   -- 保存消息到临时文件
   local f = io.open(msg_file, "w")
@@ -372,8 +449,8 @@ function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, 
     return nil, "无法创建消息文件"
   end
   
-  if mode == "elevenlabs" then
-    -- v1.0+ ElevenLabs 模式：messages 是字符串（文本内容）
+  if mode == "elevenlabs" or mode == "audio" or mode == "doubao_voices" then
+    -- 音频模式：messages 是 worker 需要的 JSON 字符串
     local text_content = messages
     if type(messages) == "table" and messages[1] then
       text_content = messages[1].content or ""
@@ -440,6 +517,8 @@ function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, 
   -- 清理旧的信号文件（如果存在）
   os.remove(signal_file)
   os.remove(resp_file)
+  os.remove(pid_file)
+  os.remove(cancel_file)
 
   local python_cmd = find_pythonw(worker_dir)
   if not python_cmd then
@@ -454,6 +533,8 @@ function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, 
   local args = cmd_quote_arg(launcher_path)
     .. " --worker " .. cmd_quote_arg(worker_path)
     .. " --log " .. cmd_quote_arg(log_file)
+    .. " --pid-file " .. cmd_quote_arg(pid_file)
+    .. " --cancel-file " .. cmd_quote_arg(cancel_file)
     .. " --"
     .. " " .. cmd_quote_arg(request_id)
     .. " " .. cmd_quote_arg(api_url)
@@ -463,6 +544,7 @@ function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, 
     .. " " .. cmd_quote_arg(resp_file)
     .. " " .. cmd_quote_arg(signal_file)
     .. " " .. cmd_quote_arg(mode)
+    .. " " .. cmd_quote_arg(cancel_file)
 
   local launch_log = io.open(log_file, "w")
   if launch_log then
@@ -474,12 +556,19 @@ function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, 
     launch_log:close()
   end
 
-  local ok, result = shell_execute_hidden(python_cmd, args, worker_dir, mode == "elevenlabs" and "elevenlabs_worker" or "llm_worker")
+  local ok, result = shell_execute_hidden(
+    python_cmd,
+    args,
+    worker_dir,
+    (mode == "elevenlabs" or mode == "audio" or mode == "doubao_voices") and "audio_worker" or "llm_worker"
+  )
   if not ok then
     pcall(function() os.remove(msg_file) end)
     pcall(function() os.remove(resp_file) end)
     pcall(function() os.remove(signal_file) end)
     pcall(function() os.remove(key_file) end)
+    pcall(function() os.remove(pid_file) end)
+    pcall(function() os.remove(cancel_file) end)
     return nil, "启动 worker 失败: " .. tostring(result)
   end
   
@@ -490,6 +579,8 @@ function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, 
     resp_file = resp_file,
     signal_file = signal_file,
     key_file = key_file,  -- 安全：记录密钥文件路径，完成后清理
+    pid_file = pid_file,
+    cancel_file = cancel_file,
     on_complete = on_complete,
     on_stream = on_stream,
     is_stream = is_stream,
@@ -523,6 +614,10 @@ function AsyncPipe.fetch_elevenlabs_voices(api_key, on_complete)
   return AsyncPipe.send_request("https://api.elevenlabs.io/v1/voices", api_key or "", "", {}, on_complete, "elevenlabs_voices")
 end
 
+function AsyncPipe.fetch_doubao_voices(api_key, on_complete)
+  return AsyncPipe.send_request("doubao_voices", api_key or "", "", "{}", on_complete, "doubao_voices")
+end
+
 -- ============================================
 -- 轮询检查信号文件（v1.0 支持多个并发请求）
 -- ============================================
@@ -548,6 +643,8 @@ function AsyncPipe._poll()
         pcall(function() os.remove(req.resp_file) end)
         pcall(function() os.remove(req.signal_file) end)
         pcall(function() os.remove(req.key_file) end)
+        pcall(function() os.remove(req.pid_file) end)
+        pcall(function() os.remove(req.cancel_file) end)
         
         -- 调用回调
         local callback = req.on_complete
@@ -569,6 +666,8 @@ function AsyncPipe._poll()
           pcall(function() os.remove(req.resp_file) end)
           pcall(function() os.remove(req.signal_file) end)
           pcall(function() os.remove(req.key_file) end)
+          pcall(function() os.remove(req.pid_file) end)
+          pcall(function() os.remove(req.cancel_file) end)
 
           -- 调用回调
           local callback = req.on_complete
@@ -582,11 +681,14 @@ function AsyncPipe._poll()
     else
       -- 超时检查（600秒）
       if req.poll_count > req.max_polls then
+        terminate_request_worker(req, 0)
         -- 清理（包括密钥文件）
         pcall(function() os.remove(req.msg_file) end)
         pcall(function() os.remove(req.resp_file) end)
         pcall(function() os.remove(req.signal_file) end)
         pcall(function() os.remove(req.key_file) end)
+        pcall(function() os.remove(req.pid_file) end)
+        pcall(function() os.remove(req.cancel_file) end)
 
         local callback = req.on_complete
         callback(nil, "请求超时（600秒）")
@@ -648,10 +750,15 @@ function AsyncPipe.cancel()
   end
   
   for _, req in ipairs(AsyncPipe.pending_requests) do
+    local terminated = terminate_request_worker(req, 600)
     pcall(function() os.remove(req.msg_file) end)
     pcall(function() os.remove(req.resp_file) end)
     pcall(function() os.remove(req.signal_file) end)
     pcall(function() os.remove(req.key_file) end)
+    pcall(function() os.remove(req.pid_file) end)
+    if terminated then
+      pcall(function() os.remove(req.cancel_file) end)
+    end
     -- 通知回调：已取消
     if req.on_complete then
       pcall(req.on_complete, nil, "请求已取消")

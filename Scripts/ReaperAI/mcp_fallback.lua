@@ -10,8 +10,11 @@ local function lua_quote(s)
 end
 
 local function selected_token(v)
-  v = tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
-  return v == "selected" or v == "selection" or v == "current" or v == "当前" or v == "选中" or v == "已选中"
+  v = tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower():gsub("%s+", "_")
+  return v == "selected" or v == "selection" or v == "current" or
+    v == "selected_region" or v == "selected_regions" or v == "current_region" or
+    v == "当前" or v == "选中" or v == "已选中" or v == "当前选中" or
+    v == "选中的region" or v == "选中的_region" or v == "选中的区域"
 end
 
 local function boolish(v)
@@ -66,6 +69,8 @@ local function region_delete_fallback_code(params)
   local order_end = first_nonempty_param(params, {"order_end", "ordinal_end", "sequence_end"})
   local name = first_nonempty_param(params, {"name", "match"})
   local delete_all = targets_all(params) or all_token(params.regions)
+  local selected_regions = false
+  local keep_selected = false
   return
     "local raw_target = " .. lua_quote(target) .. "\n" ..
     "local raw_start = " .. lua_quote(start_id) .. "\n" ..
@@ -75,6 +80,8 @@ local function region_delete_fallback_code(params)
     "local raw_order_end = " .. lua_quote(order_end) .. "\n" ..
     "local raw_name = " .. lua_quote(name) .. "\n" ..
     "local delete_all = " .. tostring(delete_all) .. "\n" ..
+    "local selected_regions = false\n" ..
+    "local keep_selected = false\n" ..
     "local wanted = {}\n" ..
     "local order_wanted = {}\n" ..
     "local function trim(s) return tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', '') end\n" ..
@@ -112,13 +119,37 @@ local function region_delete_fallback_code(params)
     "end\n" ..
     "table.sort(regions, function(a, b) if (a.pos or 0) ~= (b.pos or 0) then return (a.pos or 0) < (b.pos or 0) end; if (a.rgnend or 0) ~= (b.rgnend or 0) then return (a.rgnend or 0) < (b.rgnend or 0) end; return (a.id or 0) < (b.id or 0) end)\n" ..
     "local targets = {}\n" ..
-    "local needle = name_filter:lower()\n" ..
-    "for order_index, region in ipairs(regions) do\n" ..
-    "  local id = tonumber(region.id)\n" ..
-    "  local by_id = id and wanted[id]\n" ..
-    "  local by_order = order_wanted[order_index] == true\n" ..
-    "  local by_name = name_filter ~= '' and tostring(region.name or ''):lower():find(needle, 1, true) ~= nil\n" ..
-    "  if delete_all or by_id or by_order or by_name then table.insert(targets, region) end\n" ..
+    "local function close_enough(a, b) return math.abs((tonumber(a) or 0) - (tonumber(b) or 0)) <= 0.001 end\n" ..
+    "local function ranges_overlap(a_start, a_end, b_start, b_end) return (a_end or 0) > (b_start or 0) + 0.001 and (a_start or 0) < (b_end or 0) - 0.001 end\n" ..
+    "local function selected_region_targets()\n" ..
+    "  local ts_start, ts_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)\n" ..
+    "  if not ts_start or not ts_end or ts_end <= ts_start then return {}, '当前没有时间选区，无法推断选中的 Region' end\n" ..
+    "  local exact, contained, overlap = {}, {}, {}\n" ..
+    "  for _, region in ipairs(regions) do\n" ..
+    "    local pos = region.pos or 0; local rgnend = region.rgnend or 0\n" ..
+    "    if close_enough(pos, ts_start) and close_enough(rgnend, ts_end) then table.insert(exact, region)\n" ..
+    "    elseif pos >= ts_start - 0.001 and rgnend <= ts_end + 0.001 then table.insert(contained, region)\n" ..
+    "    elseif ranges_overlap(pos, rgnend, ts_start, ts_end) then table.insert(overlap, region) end\n" ..
+    "  end\n" ..
+    "  if #exact > 0 then return exact, '' end; if #contained > 0 then return contained, '' end; if #overlap > 0 then return overlap, '' end\n" ..
+    "  return {}, '时间选区内没有匹配 Region'\n" ..
+    "end\n" ..
+    "local keep_ids = {}\n" ..
+    "if keep_selected then\n" ..
+    "  local keep_targets, keep_error = selected_region_targets(); if #keep_targets == 0 then return { ok=false, message=keep_error or 'No selected Region inferred to keep', changed={deleted=0} } end\n" ..
+    "  for _, region in ipairs(keep_targets) do if region.id then keep_ids[tonumber(region.id)] = true end end\n" ..
+    "end\n" ..
+    "if selected_regions and not keep_selected then\n" ..
+    "  local selected_targets, selected_error = selected_region_targets(); if #selected_targets == 0 then return { ok=false, message=selected_error or 'No selected Region inferred', changed={deleted=0} } end; targets = selected_targets\n" ..
+    "else\n" ..
+    "  local needle = name_filter:lower()\n" ..
+    "  for order_index, region in ipairs(regions) do\n" ..
+    "    local id = tonumber(region.id)\n" ..
+    "    local by_id = id and wanted[id]\n" ..
+    "    local by_order = order_wanted[order_index] == true\n" ..
+    "    local by_name = name_filter ~= '' and tostring(region.name or ''):lower():find(needle, 1, true) ~= nil\n" ..
+    "    if delete_all or by_id or by_order or by_name then table.insert(targets, region) end\n" ..
+    "  end\n" ..
     "end\n" ..
     "table.sort(targets, function(a, b) return (a.id or 0) > (b.id or 0) end)\n" ..
     "local deleted = 0\n" ..
@@ -305,6 +336,109 @@ local function color_to_rgb(raw)
       raw
   end
   return 255, 0, 0, raw
+end
+
+local function custom_color_expr(params)
+  local color_raw = params.color or params.value or params.rgb or "red"
+  local r, g, b, label = color_to_rgb(color_raw)
+  local color_key = tostring(color_raw or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+  local clear_color = color_key == "default" or color_key == "clear" or color_key == "none" or color_key == "reset" or color_key == "native" or color_key == "0" or color_key == "默认" or color_key == "默认色" or color_key == "清除" or color_key == "清空" or color_key == "恢复默认"
+  if clear_color then
+    return "0", "default"
+  end
+  return "reaper.ColorToNative(" .. r .. ", " .. g .. ", " .. b .. ") + 16777216", label
+end
+
+local function region_set_color_fallback_code(params)
+  params = params or {}
+  local color_expr, label = custom_color_expr(params)
+  local target = first_nonempty_param(params, {"range", "ids", "index", "id", "region", "target"})
+  local start_id = first_nonempty_param(params, {"start", "from"})
+  local end_id = first_nonempty_param(params, {"end", "to"})
+  local order_target = first_nonempty_param(params, {"order_range", "ordinal_range", "sequence_range", "order", "ordinal", "sequence", "order_index", "ordinal_index", "sequence_index"})
+  local order_start = first_nonempty_param(params, {"order_start", "ordinal_start", "sequence_start"})
+  local order_end = first_nonempty_param(params, {"order_end", "ordinal_end", "sequence_end"})
+  local name = first_nonempty_param(params, {"name", "match"})
+  local scope = tostring(params.scope or params.selector or params.target_scope or ""):lower()
+  local current_region = boolish(params.current) or scope == "current" or scope == "cursor" or scope == "edit_cursor"
+  local time_selection_regions = boolish(params.time_selection) or scope == "time_selection" or scope == "time-selection" or scope == "timerange" or scope == "time_range" or scope == "loop_selection"
+  local selected_regions = boolish(params.selected) or (selected_token(scope) and not current_region and not time_selection_regions)
+  local set_all = targets_all(params) or all_token(params.regions)
+  return
+    "local raw_target = " .. lua_quote(target) .. "\n" ..
+    "local raw_start = " .. lua_quote(start_id) .. "\n" ..
+    "local raw_end = " .. lua_quote(end_id) .. "\n" ..
+    "local raw_order_target = " .. lua_quote(order_target) .. "\n" ..
+    "local raw_order_start = " .. lua_quote(order_start) .. "\n" ..
+    "local raw_order_end = " .. lua_quote(order_end) .. "\n" ..
+    "local raw_name = " .. lua_quote(name) .. "\n" ..
+    "local color = " .. color_expr .. "\n" ..
+    "local color_label = " .. lua_quote(label) .. "\n" ..
+    "local set_all = " .. tostring(set_all) .. "\n" ..
+    "local selected_regions = " .. tostring(selected_regions) .. "\n" ..
+    "local current_region = " .. tostring(current_region) .. "\n" ..
+    "local time_selection_regions = " .. tostring(time_selection_regions) .. "\n" ..
+    "local EPS = 0.001\n" ..
+    "if not reaper.SetProjectMarker3 then return { ok=false, message='region/set_color requires reaper.SetProjectMarker3', changed={regions=0} } end\n" ..
+    "local wanted, order_wanted = {}, {}\n" ..
+    "local function trim(s) return tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', '') end\n" ..
+    "local function add_id(n) n=tonumber(n); if n then wanted[math.floor(n)] = true end end\n" ..
+    "local function add_order(n) n=tonumber(n); if n then order_wanted[math.floor(n)] = true end end\n" ..
+    "local function add_range(a,b) a=tonumber(a); b=tonumber(b); if not a or not b then return end; local lo=math.min(math.floor(a), math.floor(b)); local hi=math.max(math.floor(a), math.floor(b)); for id=lo,hi do wanted[id]=true end end\n" ..
+    "local function add_order_range(a,b) a=tonumber(a); b=tonumber(b); if not a or not b then return end; local lo=math.min(math.floor(a), math.floor(b)); local hi=math.max(math.floor(a), math.floor(b)); for idx=lo,hi do order_wanted[idx]=true end end\n" ..
+    "local function normalize_token(s) s=trim(s):gsub('^[Rr]egion%s*',''):gsub('^region%s*',''):gsub('[Rr]',''); return trim(s) end\n" ..
+    "local function parse_text(s, add_single, add_range_fn) s=normalize_token(s); local a,b=s:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if a and b then add_range_fn(a,b); return end; a,b=s:match('(%-?%d+)%s*[%-%~:]%s*(%-?%d+)'); if a and b then add_range_fn(a,b) end; for part in s:gmatch('[^,%s;|]+') do part=normalize_token(part); local x,y=part:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if x and y then add_range_fn(x,y) else add_single(part) end end end\n" ..
+    "local function close_enough(a,b) return math.abs((tonumber(a) or 0)-(tonumber(b) or 0)) <= EPS end\n" ..
+    "local function ranges_overlap(a_start,a_end,b_start,b_end) return (tonumber(a_end) or 0) > (tonumber(b_start) or 0) + EPS and (tonumber(a_start) or 0) < (tonumber(b_end) or 0) - EPS end\n" ..
+    "if trim(raw_start) ~= '' or trim(raw_end) ~= '' then add_range(raw_start, raw_end) end; parse_text(raw_target, add_id, add_range)\n" ..
+    "if trim(raw_order_start) ~= '' or trim(raw_order_end) ~= '' then add_order_range(raw_order_start, raw_order_end) end; parse_text(raw_order_target, add_order, add_order_range)\n" ..
+    "local has_ids=false; for _ in pairs(wanted) do has_ids=true; break end; local has_order=false; for _ in pairs(order_wanted) do has_order=true; break end\n" ..
+    "local name_filter=trim(raw_name); local contextual=selected_regions or current_region or time_selection_regions\n" ..
+    "if not set_all and not contextual and not has_ids and not has_order and name_filter == '' then return { ok=false, message='region/set_color requires a Region target', changed={regions=0} } end\n" ..
+    "local function enum_region_source(i) if reaper.EnumProjectMarkers3 then return reaper.EnumProjectMarkers3(0, i) end; return reaper.EnumProjectMarkers(i) end\n" ..
+    "local _, marker_count, region_count = reaper.CountProjectMarkers(0); local total=(tonumber(marker_count) or 0)+(tonumber(region_count) or 0); local regions={}\n" ..
+    "for i=0,total-1 do local retval,isrgn,pos,rgnend,rname,markrgnindex=enum_region_source(i); if retval ~= 0 and isrgn then table.insert(regions,{id=tonumber(markrgnindex), name=rname or '', pos=pos or 0, rgnend=rgnend or 0}) end end\n" ..
+    "table.sort(regions, function(a,b) if (a.pos or 0) ~= (b.pos or 0) then return (a.pos or 0) < (b.pos or 0) end; if (a.rgnend or 0) ~= (b.rgnend or 0) then return (a.rgnend or 0) < (b.rgnend or 0) end; return (a.id or 0) < (b.id or 0) end)\n" ..
+    "local ts_active, ts_start, ts_end=false,0,0; if reaper.GetSet_LoopTimeRange then ts_start,ts_end=reaper.GetSet_LoopTimeRange(false,false,0,0,false); ts_start=tonumber(ts_start) or 0; ts_end=tonumber(ts_end) or 0; ts_active=ts_end > ts_start + EPS end\n" ..
+    "local cursor=reaper.GetCursorPosition and (tonumber(reaper.GetCursorPosition()) or 0) or 0; local targets={}; local needle=name_filter:lower()\n" ..
+    "for order_index,region in ipairs(regions) do local id=tonumber(region.id); local by_id=id and wanted[id]; local by_order=order_wanted[order_index] == true; local by_name=name_filter ~= '' and tostring(region.name or ''):lower():find(needle,1,true) ~= nil; local in_time=ts_active and ranges_overlap(region.pos, region.rgnend, ts_start, ts_end); local inferred_selected=ts_active and ((close_enough(region.pos,ts_start) and close_enough(region.rgnend,ts_end)) or (region.pos >= ts_start - EPS and region.rgnend <= ts_end + EPS) or in_time); local at_cursor=cursor >= (region.pos or 0) - EPS and cursor <= (region.rgnend or 0) + EPS; if set_all or by_id or by_order or by_name or (selected_regions and inferred_selected) or (time_selection_regions and in_time) or (current_region and at_cursor) then table.insert(targets, region) end end\n" ..
+    "local changed=0; local labels={}; for _,region in ipairs(targets) do if region.id then local ok=reaper.SetProjectMarker3(0, region.id, true, region.pos, region.rgnend, region.name, color); if ok then changed=changed+1; if #labels < 8 then table.insert(labels, 'R' .. tostring(region.id)) end end end end\n" ..
+    "reaper.UpdateTimeline(); reaper.UpdateArrange(); if changed == 0 then return { ok=false, message='No matching Region found for region/set_color', changed={regions=0} } end\n" ..
+    "return { ok=true, message='Set ' .. tostring(changed) .. ' Region(s) color to ' .. color_label .. ': ' .. table.concat(labels, ', '), changed={regions=changed} }\n"
+end
+
+local function item_set_color_fallback_code(params)
+  params = params or {}
+  local color_expr, label = custom_color_expr(params)
+  local target = first_nonempty_param(params, {"index", "item", "target"})
+  local name = first_nonempty_param(params, {"name", "match", "item_name"})
+  local scope = tostring(params.scope or params.selector or params.target_scope or ""):lower()
+  local current_item = boolish(params.current) or scope == "current" or scope == "cursor" or scope == "edit_cursor"
+  local time_selection_items = boolish(params.time_selection) or scope == "time_selection" or scope == "time-selection" or scope == "timerange" or scope == "time_range" or scope == "loop_selection"
+  local selected_items = boolish(params.selected) or ((selected_token(scope) or selected_token(params.target) or selected_token(params.item)) and not current_item and not time_selection_items)
+  local set_all = targets_all(params) or all_token(params.items)
+  return
+    "local raw_target = " .. lua_quote(target) .. "\n" ..
+    "local raw_name = " .. lua_quote(name) .. "\n" ..
+    "local color = " .. color_expr .. "\n" ..
+    "local color_label = " .. lua_quote(label) .. "\n" ..
+    "local set_all = " .. tostring(set_all) .. "\n" ..
+    "local selected_items = " .. tostring(selected_items) .. "\n" ..
+    "local current_item = " .. tostring(current_item) .. "\n" ..
+    "local time_selection_items = " .. tostring(time_selection_items) .. "\n" ..
+    "local EPS = 0.001\n" ..
+    "local function trim(s) return tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', '') end\n" ..
+    "local function ranges_overlap(a_start,a_end,b_start,b_end) return (tonumber(a_end) or 0) > (tonumber(b_start) or 0) + EPS and (tonumber(a_start) or 0) < (tonumber(b_end) or 0) - EPS end\n" ..
+    "local function item_name(item) local take=item and reaper.GetActiveTake(item); if take and reaper.GetTakeName then return reaper.GetTakeName(take) or '' end; return '' end\n" ..
+    "local function target_index(raw) raw=trim(raw):gsub('^[Ii]tem%s*',''):gsub('[Ii]',''); local n=tonumber(raw); if not n then return nil end; return math.floor(n) end\n" ..
+    "local wanted_index=target_index(raw_target); local name_filter=trim(raw_name); local contextual=selected_items or current_item or time_selection_items\n" ..
+    "if not set_all and not contextual and wanted_index == nil and name_filter == '' then return { ok=false, message='item/set_color requires an item target', changed={items=0} } end\n" ..
+    "local ts_active, ts_start, ts_end=false,0,0; if reaper.GetSet_LoopTimeRange then ts_start,ts_end=reaper.GetSet_LoopTimeRange(false,false,0,0,false); ts_start=tonumber(ts_start) or 0; ts_end=tonumber(ts_end) or 0; ts_active=ts_end > ts_start + EPS end\n" ..
+    "local cursor=reaper.GetCursorPosition and (tonumber(reaper.GetCursorPosition()) or 0) or 0; local needle=name_filter:lower(); local targets={}\n" ..
+    "for i=0,reaper.CountMediaItems(0)-1 do local item=reaper.GetMediaItem(0,i); if item then local selected=reaper.IsMediaItemSelected and reaper.IsMediaItemSelected(item); local pos=tonumber(reaper.GetMediaItemInfo_Value(item,'D_POSITION')) or 0; local len=tonumber(reaper.GetMediaItemInfo_Value(item,'D_LENGTH')) or 0; local item_end=pos+len; local in_time=ts_active and ranges_overlap(pos,item_end,ts_start,ts_end); local at_cursor=cursor >= pos - EPS and cursor <= item_end + EPS; local by_name=name_filter ~= '' and item_name(item):lower():find(needle,1,true) ~= nil; if set_all or (wanted_index ~= nil and i == wanted_index) or (selected_items and selected) or (time_selection_items and in_time) or (current_item and at_cursor) or by_name then table.insert(targets,item) end end end\n" ..
+    "local changed=0; for _,item in ipairs(targets) do reaper.SetMediaItemInfo_Value(item, 'I_CUSTOMCOLOR', color); if reaper.UpdateItemInProject then reaper.UpdateItemInProject(item) end; changed=changed+1 end\n" ..
+    "reaper.UpdateArrange(); if changed == 0 then return { ok=false, message='No matching item found for item/set_color', changed={items=0} } end\n" ..
+    "return { ok=true, message='Set ' .. tostring(changed) .. ' item(s) color to ' .. color_label, changed={items=changed} }\n"
 end
 
 local function envelope_fallback_code(params, clear_only)
@@ -503,6 +637,8 @@ function McpFallback.create()
       ["track/set_pan"] = true,
       ["track/set_color"] = true,
       ["track/clear_color"] = true,
+      ["region/set_color"] = true,
+      ["item/set_color"] = true,
       ["track/mute"] = true,
       ["track/solo"] = true,
       ["item/fade"] = true,
@@ -514,9 +650,14 @@ function McpFallback.create()
     }
     if selection_target_endpoints[endpoint] then
       local selected_keys = {"target", "scope", "track", "item", "take", "name", "index"}
+      local preserve_current = endpoint == "region/set_color" or endpoint == "item/set_color"
+      local function is_current_alias(value)
+        value = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower():gsub("%s+", "_")
+        return value == "current" or value == "current_region" or value == "current_item" or value == "cursor" or value == "edit_cursor"
+      end
       local has_selected_alias = false
       for _, key in ipairs(selected_keys) do
-        if selected_token(params[key]) then
+        if selected_token(params[key]) and not (preserve_current and is_current_alias(params[key])) then
           has_selected_alias = true
           params[key] = nil
         end
@@ -792,6 +933,14 @@ function McpFallback.create()
       desc = "track/set_color (本地fallback)"
 
       end
+
+    elseif endpoint == "region/set_color" then
+      lua_code = region_set_color_fallback_code(params)
+      desc = "region/set_color (local fallback)"
+
+    elseif endpoint == "item/set_color" then
+      lua_code = item_set_color_fallback_code(params)
+      desc = "item/set_color (local fallback)"
 
     elseif endpoint == "track/mute" then
       local mute_val = (params.mute == "true" or params.mute == "1") and "1" or "0"

@@ -300,11 +300,17 @@ def write_lua_config(argv: list[str]) -> int:
                 "LLM_API_URL=https://api.openai.com/v1/chat/completions",
                 "LLM_MODEL=gpt-4o-mini",
                 "",
+                "AUDIO_PROVIDER=elevenlabs",
                 "# ELEVENLABS_API_KEY=在此填入 ElevenLabs API Key（可选）",
+                "# DOUBAO_API_KEY=在此填入火山引擎豆包 API Key（可选）",
+                "# DOUBAO_SPEAKER=豆包语音合成音色会在“生成音频”页下拉选择后自动保存",
+                "# DOUBAO_LANGUAGE=zh_mix",
+                "# DOUBAO_ACCENT=default",
+                "# DOUBAO_SPEED_RATIO=1.0",
+                "# DOUBAO_PITCH_RATIO=1.0",
+                "# DOUBAO_VOLUME_RATIO=1.0",
+                "# 音频服务商、Key、声线/音色和生成参数都可以在“生成音频”页管理",
                 "# 获取地址: https://elevenlabs.io/app/settings/api-keys",
-                '# 使用方式: 在 ReaperAI 输入框输入 "11你的描述" 即可生成音频',
-                "# 例如: 11爆炸音效，低沉有力",
-                "# 例如: 11Hello world",
                 "",
             ]
         ),
@@ -771,7 +777,7 @@ def install_dependencies(argv: list[str]) -> int:
     config_path = mcp_dir / "config.json"
 
     print("============================================")
-    print("  ReaperAI v1.0.4 - 中文依赖安装器")
+    print("  ReaperAI v1.0.5 - 中文依赖安装器")
     print("============================================")
     print()
     print("本步骤会准备 ReaperAI 私有 Python 环境、核心依赖和 FFmpeg。")
@@ -869,7 +875,7 @@ def run_wizard(argv: list[str]) -> int:
     config_path = mcp_dir / "config.json"
 
     print("============================================")
-    print("  ReaperAI v1.0.4 - 中文配置向导")
+    print("  ReaperAI v1.0.5 - 中文配置向导")
     print("============================================")
     print()
     print("这个向导会生成 ReaperAI 的 MCP 配置文件。")

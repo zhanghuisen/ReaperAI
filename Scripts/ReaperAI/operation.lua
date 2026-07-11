@@ -500,6 +500,7 @@ local ACTION_REGISTRY = {
   ["track/set_volume_by_name"] = { action = "edit", target = "track", label = "按名称设置轨道音量", effects = { modifies_project = true }, verifier = "track/property", verifier_strength = "weak" },
   ["track/set_pan"] = { action = "edit", target = "track", label = "设置轨道声像", effects = { modifies_project = true }, verifier = "track/property", verifier_strength = "weak" },
   ["track/set_color"] = { action = "edit", target = "track", label = "设置轨道颜色", effects = { modifies_project = true }, verifier = "track/property", verifier_strength = "weak" },
+  ["item/set_color"] = { action = "edit", target = "item", label = "Set item color", effects = { modifies_project = true }, verifier = "item/property", verifier_strength = "weak" },
   ["track/mute"] = { action = "edit", target = "track", label = "设置轨道静音", effects = { modifies_project = true }, verifier = "track/property", verifier_strength = "weak" },
   ["track/solo"] = { action = "edit", target = "track", label = "设置轨道独奏", effects = { modifies_project = true }, verifier = "track/property", verifier_strength = "weak" },
   ["track/add_fx"] = { action = "edit", target = "fx", label = "添加 FX", effects = { modifies_project = true }, verifier = "fx/add", verifier_strength = "strong" },
@@ -526,6 +527,7 @@ local ACTION_REGISTRY = {
 }
 
 ACTION_REGISTRY["region/delete"] = { action = "delete", target = "region", label = "Delete Region", effects = { modifies_project = true, deletes_project = true }, verifier = "region/delete", verifier_strength = "strong" }
+ACTION_REGISTRY["region/set_color"] = { action = "edit", target = "region", label = "Set Region color", effects = { modifies_project = true }, verifier = "region/property", verifier_strength = "weak" }
 ACTION_REGISTRY["track/clear_color"] = { action = "edit", target = "track", label = "Clear track custom color", effects = { modifies_project = true }, verifier = "track/property", verifier_strength = "weak" }
 
 local function operation_action_registry(endpoint)
@@ -651,6 +653,8 @@ local function operation_mcp_risk(endpoint, params, reasons, scopes)
     ["track/remove_fx"] = "移除 FX",
     ["track/group_into_folder"] = "移动轨道到文件夹",
     ["track/create_folder"] = "移动轨道到文件夹",
+    ["region/set_color"] = "设置 Region 颜色",
+    ["item/set_color"] = "设置素材颜色",
     ["item/fade"] = "修改素材 fade 属性",
     ["item/set_fade"] = "修改素材 fade 属性",
     ["item/fade_shape"] = "修改素材 fade 曲线形状",
@@ -1832,6 +1836,18 @@ local function operation_script_fact_contract(code, known_effects)
     })
   end
 
+  args = operation_first_call_args(code, "SetMediaItemInfo_Value")
+  if args and #args >= 2 and operation_unquote_lua_string(args[2]) == "I_CUSTOMCOLOR" then
+    local params, source = operation_item_target_from_script_expr(code, args[1])
+    return operation_script_contract_result("item/set_color", params, "item", source, source and "strong" or "weak", {
+      modifies_project = true,
+      requires_target = true,
+      question = "这个 SCRIPT 会设置 Item 颜色，但无法静态确认目标素材。请说明要设置哪个 Item。",
+      fields = { "item_target" },
+      placeholder = "输入 item 名称/索引，或先选中素材",
+    })
+  end
+
   args = operation_first_call_args(code, "SetMediaItemInfo_Value") or operation_first_call_args(code, "SplitMediaItem")
   if args and #args >= 1 then
     local params, source = operation_item_target_from_script_expr(code, args[1])
@@ -1884,6 +1900,22 @@ local function operation_script_fact_contract(code, known_effects)
       requires_target = false,
       reason = "script deletes marker or region objects",
     })
+  end
+
+  args = operation_first_call_args(code, "SetProjectMarker3")
+  if args and #args >= 7 then
+    local is_region = operation_project_marker_is_region_arg(args[3])
+    local index = operation_lua_integer_literal(args[2])
+    if is_region == true then
+      local params = index and { index = index } or {}
+      return operation_script_contract_result("region/set_color", params, "region", index and "index" or nil, "weak", {
+        modifies_project = true,
+        requires_target = not index,
+        question = "这个 SCRIPT 会设置 Region 颜色，但无法静态确认目标 Region。请说明要设置哪个 Region。",
+        fields = { "region_target" },
+        placeholder = "输入 R 编号/范围，或先选中 Region",
+      })
+    end
   end
 
   if code:match("SetProjectMarker") then
@@ -2260,7 +2292,7 @@ local function operation_rewrite_mcp_first(steps)
       and next_step.kind == "mcp"
       and operation_script_looks_like_generated_item_selection(step.code or "") then
       local endpoint, params = operation_parse_call(next_step.call or "")
-      if endpoint == "item/fade" or endpoint == "item/set_fade" or endpoint == "item/fade_shape" or endpoint == "item/set_fade_shape" then
+      if endpoint == "item/set_color" or endpoint == "item/fade" or endpoint == "item/set_fade" or endpoint == "item/fade_shape" or endpoint == "item/set_fade_shape" then
         params.item = params.item or params.target or "created.items[1]"
         params.target = nil
         params.selected = nil
@@ -2369,6 +2401,13 @@ local function operation_validate_mcp_params(endpoint, params)
     if not operation_has_track_contract_target(endpoint, p) then
       table.insert(issues, "track/clear_color requires selected/index/name/track/target/all")
     end
+  elseif endpoint == "item/set_color" then
+    if not operation_has_value(p, {"color", "value", "rgb"}) then
+      table.insert(issues, "item/set_color 缺少 color 参数")
+    end
+    if not operation_has_item_contract_target(p, true) and not operation_has_value(p, {"time_selection", "scope"}) then
+      table.insert(issues, "item/set_color 缺少素材目标，需要 selected/all/index/name/item/target/time_selection")
+    end
   elseif endpoint == "track/mute" then
     if not operation_has_track_contract_target(endpoint, p) then
       table.insert(issues, "track/mute 缺少轨道目标，需要 selected/index/name/track/target")
@@ -2391,6 +2430,19 @@ local function operation_validate_mcp_params(endpoint, params)
     if not operation_has_track_contract_target(endpoint, p) then
       table.insert(issues, "track/remove_fx 缺少轨道目标，需要 selected/track/name/target/index")
     end
+  elseif endpoint == "region/set_color" then
+    if not operation_has_value(p, {"color", "value", "rgb"}) then
+      table.insert(issues, "region/set_color missing color parameter")
+    end
+    if not operation_has_value(p, {
+       "index", "id", "region", "target", "range", "ids", "start", "from", "name", "match", "all",
+      "selected", "current", "time_selection", "scope",
+      "order", "order_index", "order_start", "order_range",
+      "ordinal", "ordinal_index", "ordinal_start", "ordinal_range",
+      "sequence", "sequence_index", "sequence_start", "sequence_range"
+    }) then
+      table.insert(issues, "region/set_color missing Region target")
+    end
   elseif endpoint == "region/delete" then
     if not operation_has_value(p, {
        "index", "id", "region", "target", "range", "ids", "start", "from", "name", "match", "all",
@@ -2398,7 +2450,7 @@ local function operation_validate_mcp_params(endpoint, params)
       "ordinal", "ordinal_index", "ordinal_start", "ordinal_range",
       "sequence", "sequence_index", "sequence_start", "sequence_range"
     }) then
-      table.insert(issues, "region/delete missing Region index/range/name target")
+      table.insert(issues, "region/delete missing Region index/range/name/all target")
     end
     local has_start = operation_has_value(p, {"start", "from"})
     local has_end = operation_has_value(p, {"end", "to"})
@@ -2693,6 +2745,33 @@ local function operation_collect_contract_clarifications(steps, user_text, inten
           ))
           clarifications[#clarifications].fields = {"format"}
         end
+      elseif endpoint == "region/set_color" then
+        if not operation_has_value(params, {"color", "value", "rgb"}) then
+          table.insert(clarifications, operation_clarification(
+            step,
+            i,
+            "要把 Region 设置成什么颜色？",
+            {},
+            "region/set_color missing color",
+            { fields = {"color"}, free_input = true, placeholder = "输入颜色名、#RRGGBB 或 r,g,b" }
+          ))
+        end
+        if not operation_has_value(params, {
+          "index", "id", "region", "target", "range", "ids", "start", "from", "name", "match", "all",
+          "selected", "current", "time_selection", "scope",
+          "order", "order_index", "order_start", "order_range",
+          "ordinal", "ordinal_index", "ordinal_start", "ordinal_range",
+          "sequence", "sequence_index", "sequence_start", "sequence_range"
+        }) then
+          table.insert(clarifications, operation_clarification(
+            step,
+            i,
+            "要给哪个 Region 设置颜色？请说明 Region 目标。",
+            {},
+            "region/set_color missing region target",
+            { fields = {"region_target"}, free_input = true, placeholder = "选中 Region、R15-R20、Region 名称，或当前/时间选区" }
+          ))
+        end
       elseif endpoint == "region/delete" then
         if operation_region_delete_order_ambiguous(user_text, params) then
           table.insert(clarifications, operation_clarification(
@@ -2712,7 +2791,7 @@ local function operation_collect_contract_clarifications(steps, user_text, inten
             }
           ))
         elseif not operation_has_value(params, {
-          "index", "id", "region", "target", "range", "ids", "start", "from", "name", "match",
+          "index", "id", "region", "target", "range", "ids", "start", "from", "name", "match", "all",
           "order", "order_index", "order_start", "order_range",
           "ordinal", "ordinal_index", "ordinal_start", "ordinal_range",
           "sequence", "sequence_index", "sequence_start", "sequence_range"
@@ -2723,7 +2802,7 @@ local function operation_collect_contract_clarifications(steps, user_text, inten
             "要删除哪些 Region？请输入 Region 编号或范围，例如 15-20。",
             {},
             "region/delete missing region target",
-            { fields = {"region_range"}, free_input = true, placeholder = "R15-R20 或按时间线第5-10个" }
+            { fields = {"region_range"}, free_input = true, placeholder = "选中 Region、R15-R20 或按时间线第5-10个" }
           ))
         end
       elseif endpoint == "marker/delete" then
@@ -2735,6 +2814,27 @@ local function operation_collect_contract_clarifications(steps, user_text, inten
             {},
             "marker/delete missing marker index",
             { fields = {"index"}, free_input = true, placeholder = "输入 Marker 编号" }
+          ))
+        end
+      elseif endpoint == "item/set_color" then
+        if not operation_has_item_contract_target(params, true) and not operation_has_value(params, {"time_selection", "scope"}) then
+          table.insert(clarifications, operation_clarification(
+            step,
+            i,
+            "要给哪些素材设置颜色？请说明素材目标。",
+            {},
+            "item/set_color missing item target",
+            { fields = {"target_item"}, free_input = true, placeholder = "描述要处理的素材目标" }
+          ))
+        end
+        if not operation_has_value(params, {"color", "value", "rgb"}) then
+          table.insert(clarifications, operation_clarification(
+            step,
+            i,
+            "要把素材设置成什么颜色？",
+            {},
+            "item/set_color missing color",
+            { fields = {"color"}, free_input = true, placeholder = "输入颜色名、#RRGGBB 或 r,g,b" }
           ))
         end
       elseif endpoint == "item/fade" or endpoint == "item/set_fade" then

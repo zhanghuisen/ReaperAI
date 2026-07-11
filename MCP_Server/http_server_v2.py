@@ -313,7 +313,8 @@ REAPER_API_CORE_ALLOWLIST = {
     "ReorderSelectedTracks", "ScaleToEnvelopeMode", "SelectAllMediaItems", "SetActiveTake",
     "SetEditCurPos", "SetEnvelopeStateChunk", "SetExtState", "SetMediaItemInfo_Value",
     "SetMediaItemSelected", "SetMediaItemTakeInfo_Value", "SetMediaItemTake_Source",
-    "SetMediaTrackInfo_Value", "SetOnlyTrackSelected", "SetProjectMarker", "SetTrackColor", "SetTrackSelected",
+    "SetMediaTrackInfo_Value", "SetOnlyTrackSelected", "SetProjectMarker", "SetProjectMarker3",
+    "SetTrackColor", "SetTrackSelected",
     "ShowConsoleMsg", "ShowMessageBox", "Sleep", "TrackFX_AddByName", "TrackFX_Delete",
     "TrackFX_GetCount", "TrackFX_GetFXName", "TrackList_AdjustWindows", "UpdateArrange",
     "UpdateItemInProject", "UpdateTimeline", "defer", "file_exists", "new_array", "time_precise",
@@ -806,6 +807,8 @@ def parse_mcp_call(call_string: str) -> dict:
         'marker/add': generate_add_marker_lua,
         'marker/delete': generate_delete_marker_lua,
         'region/delete': generate_delete_region_lua,
+        'region/set_color': generate_set_region_color_lua,
+        'item/set_color': generate_set_item_color_lua,
         'item/fade': generate_item_fade_lua,
         'item/set_fade': generate_item_fade_lua,
         'item/fade_shape': generate_item_fade_shape_lua,
@@ -890,6 +893,8 @@ SELECTION_TARGET_ENDPOINTS = {
     'track/set_pan',
     'track/set_color',
     'track/clear_color',
+    'region/set_color',
+    'item/set_color',
     'track/mute',
     'track/solo',
     'track/add_fx',
@@ -932,10 +937,17 @@ def normalize_selection_params(endpoint, params):
         return params
     normalized = dict(params)
     selected_keys = ('target', 'scope', 'track', 'item', 'take', 'name', 'index')
-    if any(_selected_token(normalized.get(key, '')) for key in selected_keys):
+    current_tokens = {'current', 'current_region', 'current_item', 'cursor', 'edit_cursor'}
+    preserve_current = endpoint in ('region/set_color', 'item/set_color')
+    def selected_alias(key):
+        value = str(normalized.get(key, '') or '').strip().lower()
+        if preserve_current and value in current_tokens:
+            return False
+        return _selected_token(value)
+    if any(selected_alias(key) for key in selected_keys):
         normalized['selected'] = 'true'
         for key in selected_keys:
-            if _selected_token(normalized.get(key, '')):
+            if selected_alias(key):
                 normalized.pop(key, None)
     return normalized
 
@@ -1808,7 +1820,7 @@ local has_order = false
 for _ in pairs(order_wanted) do has_order = true; break end
 local name_filter = trim(raw_name)
 if not delete_all and not has_ids and not has_order and name_filter == "" then
-    return { ok=false, message="region/delete requires index, range, ids, start/end, order_start/order_end, name, or match" }
+    return { ok=false, message="region/delete requires index, range, ids, start/end, order_start/order_end, name, match, or all=true" }
 end
 local function enum_marker(i)
     if reaper.EnumProjectMarkers3 then return reaper.EnumProjectMarkers3(0, i) end
@@ -1828,6 +1840,7 @@ table.sort(regions, function(a, b)
     return (a.id or 0) < (b.id or 0)
 end)
 local targets = {}
+
 local needle = name_filter:lower()
 for order_index, region in ipairs(regions) do
     local id = tonumber(region.id)
@@ -1863,6 +1876,330 @@ return { ok=true, message="Deleted " .. tostring(deleted) .. " Region(s): " .. t
         .replace("__ORDER_END__", order_end)
         .replace("__NAME__", name)
         .replace("__DELETE_ALL__", delete_all)
+    )
+
+def generate_set_region_color_lua(params):
+    """Set Region color only. Markers are never targeted by this endpoint."""
+    params = params or {}
+    target_value = first_nonempty_param(params, ('range', 'ids', 'index', 'id', 'region', 'target'))
+    start_value = first_nonempty_param(params, ('start', 'from'))
+    end_value = first_nonempty_param(params, ('end', 'to'))
+    order_value = first_nonempty_param(params, ('order_range', 'ordinal_range', 'sequence_range', 'order', 'ordinal', 'sequence', 'order_index', 'ordinal_index', 'sequence_index'))
+    order_start_value = first_nonempty_param(params, ('order_start', 'ordinal_start', 'sequence_start'))
+    order_end_value = first_nonempty_param(params, ('order_end', 'to_order', 'ordinal_end', 'sequence_end'))
+    name_value = first_nonempty_param(params, ('name', 'match'))
+    scope_value = first_nonempty_param(params, ('scope', 'selector', 'target_scope'))
+    current_region = _boolish(params.get('current')) or str(scope_value).strip().lower() in ('current', 'cursor', 'edit_cursor', '光标', '当前')
+    time_selection_regions = _boolish(params.get('time_selection')) or str(scope_value).strip().lower() in ('time_selection', 'time-selection', 'timerange', 'time_range', 'loop_selection', '时间选区')
+    selected_regions = _boolish(params.get('selected')) or (str(scope_value).strip().lower() in ('selected', 'selection', 'current_selection', '选中', '已选中') and not current_region and not time_selection_regions)
+    all_regions = _targets_all(params) or str(params.get('regions', '')).strip().lower() in ('all', '全部', '所有')
+    color_raw = params.get('color', params.get('value', params.get('rgb', '')))
+    color_key = str(color_raw or '').strip().lower()
+    clear_color = color_key in ('default', 'clear', 'none', 'reset', 'native', '0',
+                                '默认', '默认色', '清除', '清空', '恢复默认')
+    r, g, b, label = parse_color_value(color_raw)
+    color_expr = '0' if clear_color else f'reaper.ColorToNative({r}, {g}, {b}) + 16777216'
+    if clear_color:
+        label = 'default'
+    target = lua_escape_string(target_value)
+    start_id = lua_escape_string(start_value)
+    end_id = lua_escape_string(end_value)
+    order_target = lua_escape_string(order_value)
+    order_start = lua_escape_string(order_start_value)
+    order_end = lua_escape_string(order_end_value)
+    name = lua_escape_string(name_value)
+    scope = lua_escape_string(scope_value)
+    label = lua_escape_string(label or color_raw or 'color')
+    lua = r'''
+local raw_target = "__TARGET__"
+local raw_start = "__START__"
+local raw_end = "__END__"
+local raw_order_target = "__ORDER_TARGET__"
+local raw_order_start = "__ORDER_START__"
+local raw_order_end = "__ORDER_END__"
+local raw_name = "__NAME__"
+local raw_scope = "__SCOPE__"
+local set_all = __SET_ALL__
+local selected_regions = __SELECTED_REGIONS__
+local current_region = __CURRENT_REGION__
+local time_selection_regions = __TIME_SELECTION_REGIONS__
+local color = __COLOR_EXPR__
+local color_label = "__COLOR_LABEL__"
+local EPS = 0.001
+
+local wanted = {}
+local order_wanted = {}
+local function trim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
+local function add_id(n)
+    n = tonumber(n)
+    if n then wanted[math.floor(n)] = true end
+end
+local function add_order(n)
+    n = tonumber(n)
+    if n then order_wanted[math.floor(n)] = true end
+end
+local function add_range(a, b)
+    a = tonumber(a)
+    b = tonumber(b)
+    if not a or not b then return end
+    a = math.floor(a)
+    b = math.floor(b)
+    local lo = math.min(a, b)
+    local hi = math.max(a, b)
+    for id = lo, hi do wanted[id] = true end
+end
+local function add_order_range(a, b)
+    a = tonumber(a)
+    b = tonumber(b)
+    if not a or not b then return end
+    a = math.floor(a)
+    b = math.floor(b)
+    local lo = math.min(a, b)
+    local hi = math.max(a, b)
+    for idx = lo, hi do order_wanted[idx] = true end
+end
+local function normalize_token(s)
+    s = trim(s):gsub("^[Rr]egion%s*", ""):gsub("^region%s*", ""):gsub("[Rr]", "")
+    return trim(s)
+end
+local function parse_text(s, add_single, add_range_fn)
+    s = normalize_token(s)
+    local a, b = s:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+    if a and b then add_range_fn(a, b); return end
+    a, b = s:match("(%-?%d+)%s*[%-%~:]%s*(%-?%d+)")
+    if a and b then add_range_fn(a, b) end
+    for part in s:gmatch("[^,%s;|]+") do
+        part = normalize_token(part)
+        local x, y = part:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+        if x and y then add_range_fn(x, y) else add_single(part) end
+    end
+end
+local function close_enough(a, b)
+    return math.abs((tonumber(a) or 0) - (tonumber(b) or 0)) <= EPS
+end
+local function ranges_overlap(a_start, a_end, b_start, b_end)
+    a_start = tonumber(a_start) or 0
+    a_end = tonumber(a_end) or 0
+    b_start = tonumber(b_start) or 0
+    b_end = tonumber(b_end) or 0
+    return a_end > b_start + EPS and a_start < b_end - EPS
+end
+local function enum_region_source(i)
+    if reaper.EnumProjectMarkers3 then return reaper.EnumProjectMarkers3(0, i) end
+    return reaper.EnumProjectMarkers(i)
+end
+if not reaper.SetProjectMarker3 then
+    return { ok=false, message="region/set_color requires reaper.SetProjectMarker3", changed={regions=0} }
+end
+
+if trim(raw_start) ~= "" or trim(raw_end) ~= "" then add_range(raw_start, raw_end) end
+parse_text(raw_target, add_id, add_range)
+if trim(raw_order_start) ~= "" or trim(raw_order_end) ~= "" then add_order_range(raw_order_start, raw_order_end) end
+parse_text(raw_order_target, add_order, add_order_range)
+local has_ids = false
+for _ in pairs(wanted) do has_ids = true; break end
+local has_order = false
+for _ in pairs(order_wanted) do has_order = true; break end
+local name_filter = trim(raw_name)
+local contextual = selected_regions or current_region or time_selection_regions
+if not set_all and not contextual and not has_ids and not has_order and name_filter == "" then
+    return { ok=false, message="region/set_color requires color and a Region target: selected=true, scope=current/time_selection, index, range, ids, name, match, or all=true", changed={regions=0} }
+end
+
+local _, marker_count, region_count = reaper.CountProjectMarkers(0)
+local total = (tonumber(marker_count) or 0) + (tonumber(region_count) or 0)
+local regions = {}
+for i = 0, total - 1 do
+    local retval, isrgn, pos, rgnend, rname, markrgnindex = enum_region_source(i)
+    if retval ~= 0 and isrgn then
+        table.insert(regions, { id=tonumber(markrgnindex), name=rname or "", pos=pos or 0, rgnend=rgnend or 0 })
+    end
+end
+table.sort(regions, function(a, b)
+    if (a.pos or 0) ~= (b.pos or 0) then return (a.pos or 0) < (b.pos or 0) end
+    if (a.rgnend or 0) ~= (b.rgnend or 0) then return (a.rgnend or 0) < (b.rgnend or 0) end
+    return (a.id or 0) < (b.id or 0)
+end)
+
+local ts_active, ts_start, ts_end = false, 0, 0
+if reaper.GetSet_LoopTimeRange then
+    ts_start, ts_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+    ts_start = tonumber(ts_start) or 0
+    ts_end = tonumber(ts_end) or 0
+    ts_active = ts_end > ts_start + EPS
+end
+local cursor = reaper.GetCursorPosition and (tonumber(reaper.GetCursorPosition()) or 0) or 0
+local targets = {}
+local needle = name_filter:lower()
+for order_index, region in ipairs(regions) do
+    local id = tonumber(region.id)
+    local by_id = id and wanted[id]
+    local by_order = order_wanted[order_index] == true
+    local by_name = name_filter ~= "" and tostring(region.name or ""):lower():find(needle, 1, true) ~= nil
+    local in_time = ts_active and ranges_overlap(region.pos, region.rgnend, ts_start, ts_end)
+    local inferred_selected = ts_active and (
+        (close_enough(region.pos, ts_start) and close_enough(region.rgnend, ts_end)) or
+        (region.pos >= ts_start - EPS and region.rgnend <= ts_end + EPS) or
+        in_time
+    )
+    local at_cursor = cursor >= (region.pos or 0) - EPS and cursor <= (region.rgnend or 0) + EPS
+    if set_all or by_id or by_order or by_name or
+       (selected_regions and inferred_selected) or
+       (time_selection_regions and in_time) or
+       (current_region and at_cursor) then
+        table.insert(targets, region)
+    end
+end
+
+local changed = 0
+local labels = {}
+for _, region in ipairs(targets) do
+    if region.id then
+        local ok = reaper.SetProjectMarker3(0, region.id, true, region.pos, region.rgnend, region.name, color)
+        if ok then
+            changed = changed + 1
+            if #labels < 8 then table.insert(labels, "R" .. tostring(region.id)) end
+        end
+    end
+end
+reaper.UpdateTimeline()
+reaper.UpdateArrange()
+if changed == 0 then
+    return { ok=false, message="No matching Region found for region/set_color", changed={regions=0} }
+end
+return { ok=true, message="Set " .. tostring(changed) .. " Region(s) color to " .. color_label .. ": " .. table.concat(labels, ", "), changed={regions=changed} }
+'''
+    return (
+        lua.replace("__TARGET__", target)
+        .replace("__START__", start_id)
+        .replace("__END__", end_id)
+        .replace("__ORDER_TARGET__", order_target)
+        .replace("__ORDER_START__", order_start)
+        .replace("__ORDER_END__", order_end)
+        .replace("__NAME__", name)
+        .replace("__SCOPE__", scope)
+        .replace("__SET_ALL__", 'true' if all_regions else 'false')
+        .replace("__SELECTED_REGIONS__", 'true' if selected_regions else 'false')
+        .replace("__CURRENT_REGION__", 'true' if current_region else 'false')
+        .replace("__TIME_SELECTION_REGIONS__", 'true' if time_selection_regions else 'false')
+        .replace("__COLOR_EXPR__", color_expr)
+        .replace("__COLOR_LABEL__", label)
+    )
+
+def generate_set_item_color_lua(params):
+    """Set MediaItem color only. This does not modify takes, tracks, Regions, or Markers."""
+    params = params or {}
+    scope_value = first_nonempty_param(params, ('scope', 'selector', 'target_scope'))
+    target_value = first_nonempty_param(params, ('index', 'item', 'target'))
+    name_value = first_nonempty_param(params, ('name', 'match', 'item_name'))
+    current_item = _boolish(params.get('current')) or str(scope_value).strip().lower() in ('current', 'cursor', 'edit_cursor', '光标', '当前')
+    time_selection_items = _boolish(params.get('time_selection')) or str(scope_value).strip().lower() in ('time_selection', 'time-selection', 'timerange', 'time_range', 'loop_selection', '时间选区')
+    selected_items = _boolish(params.get('selected')) or ((_selected_token(scope_value) or _selected_token(params.get('target')) or _selected_token(params.get('item'))) and not current_item and not time_selection_items)
+    all_items = _targets_all(params) or _all_token(params.get('items', ''))
+    color_raw = params.get('color', params.get('value', params.get('rgb', '')))
+    color_key = str(color_raw or '').strip().lower()
+    clear_color = color_key in ('default', 'clear', 'none', 'reset', 'native', '0',
+                                '默认', '默认色', '清除', '清空', '恢复默认')
+    r, g, b, label = parse_color_value(color_raw)
+    color_expr = '0' if clear_color else f'reaper.ColorToNative({r}, {g}, {b}) + 16777216'
+    if clear_color:
+        label = 'default'
+    target = lua_escape_string(target_value)
+    name = lua_escape_string(name_value)
+    scope = lua_escape_string(scope_value)
+    label = lua_escape_string(label or color_raw or 'color')
+    lua = r'''
+local raw_target = "__TARGET__"
+local raw_name = "__NAME__"
+local raw_scope = "__SCOPE__"
+local set_all = __SET_ALL__
+local selected_items = __SELECTED_ITEMS__
+local current_item = __CURRENT_ITEM__
+local time_selection_items = __TIME_SELECTION_ITEMS__
+local color = __COLOR_EXPR__
+local color_label = "__COLOR_LABEL__"
+local EPS = 0.001
+
+local function trim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
+local function ranges_overlap(a_start, a_end, b_start, b_end)
+    a_start = tonumber(a_start) or 0
+    a_end = tonumber(a_end) or 0
+    b_start = tonumber(b_start) or 0
+    b_end = tonumber(b_end) or 0
+    return a_end > b_start + EPS and a_start < b_end - EPS
+end
+local function item_name(item)
+    local take = item and reaper.GetActiveTake(item)
+    if take and reaper.GetTakeName then return reaper.GetTakeName(take) or "" end
+    return ""
+end
+local function target_index(raw)
+    raw = trim(raw):gsub("^[Ii]tem%s*", ""):gsub("[Ii]", "")
+    local n = tonumber(raw)
+    if not n then return nil end
+    return math.floor(n)
+end
+
+local wanted_index = target_index(raw_target)
+local name_filter = trim(raw_name)
+local contextual = selected_items or current_item or time_selection_items
+if not set_all and not contextual and wanted_index == nil and name_filter == "" then
+    return { ok=false, message="item/set_color requires color and an item target: selected=true, scope=current/time_selection, index, name, match, or all=true", changed={items=0} }
+end
+
+local ts_active, ts_start, ts_end = false, 0, 0
+if reaper.GetSet_LoopTimeRange then
+    ts_start, ts_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+    ts_start = tonumber(ts_start) or 0
+    ts_end = tonumber(ts_end) or 0
+    ts_active = ts_end > ts_start + EPS
+end
+local cursor = reaper.GetCursorPosition and (tonumber(reaper.GetCursorPosition()) or 0) or 0
+local needle = name_filter:lower()
+local targets = {}
+for i = 0, reaper.CountMediaItems(0) - 1 do
+    local item = reaper.GetMediaItem(0, i)
+    if item then
+        local selected = reaper.IsMediaItemSelected and reaper.IsMediaItemSelected(item)
+        local pos = tonumber(reaper.GetMediaItemInfo_Value(item, "D_POSITION")) or 0
+        local len = tonumber(reaper.GetMediaItemInfo_Value(item, "D_LENGTH")) or 0
+        local item_end = pos + len
+        local in_time = ts_active and ranges_overlap(pos, item_end, ts_start, ts_end)
+        local at_cursor = cursor >= pos - EPS and cursor <= item_end + EPS
+        local by_name = name_filter ~= "" and item_name(item):lower():find(needle, 1, true) ~= nil
+        if set_all or
+           (wanted_index ~= nil and i == wanted_index) or
+           (selected_items and selected) or
+           (time_selection_items and in_time) or
+           (current_item and at_cursor) or
+           by_name then
+            table.insert(targets, item)
+        end
+    end
+end
+
+local changed = 0
+for _, item in ipairs(targets) do
+    reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", color)
+    if reaper.UpdateItemInProject then reaper.UpdateItemInProject(item) end
+    changed = changed + 1
+end
+reaper.UpdateArrange()
+if changed == 0 then
+    return { ok=false, message="No matching item found for item/set_color", changed={items=0} }
+end
+return { ok=true, message="Set " .. tostring(changed) .. " item(s) color to " .. color_label, changed={items=changed} }
+'''
+    return (
+        lua.replace("__TARGET__", target)
+        .replace("__NAME__", name)
+        .replace("__SCOPE__", scope)
+        .replace("__SET_ALL__", 'true' if all_items else 'false')
+        .replace("__SELECTED_ITEMS__", 'true' if selected_items else 'false')
+        .replace("__CURRENT_ITEM__", 'true' if current_item else 'false')
+        .replace("__TIME_SELECTION_ITEMS__", 'true' if time_selection_items else 'false')
+        .replace("__COLOR_EXPR__", color_expr)
+        .replace("__COLOR_LABEL__", label)
     )
 
 def _bool_param(value):
@@ -4687,6 +5024,11 @@ MCP_ENDPOINTS = {
         "params": {"index": "track index", "name": "track name or keyword", "selected": "true targets selected tracks", "all": "true targets all tracks"},
         "example": "[MCP_CALL:track/clear_color?all=true]"
     },
+    "item/set_color": {
+        "description": "Set MediaItem color only. Supports selected=true, all=true, index, name/match, or time_selection=true; color supports Chinese/English color names, #RRGGBB, r,g,b, or default/clear.",
+        "params": {"index": "0-based item index", "name": "active take name or keyword", "match": "alias of name", "selected": "true targets selected items", "all": "true targets all items", "time_selection": "true targets items overlapping the time selection", "scope": "selected/current/time_selection", "color": "color name, #RRGGBB, r,g,b, or default/clear"},
+        "example": "[MCP_CALL:item/set_color?selected=true&color=黄色]"
+    },
     "track/mute": {
         "description": "静音/取消静音轨道（支持 index、name、selected=true 或 all=true）",
         "params": {"index": "轨道索引", "name": "轨道名称或关键词", "selected": "true表示选中轨道", "all": "true表示全部轨道", "mute": "true/false"},
@@ -4744,7 +5086,7 @@ MCP_ENDPOINTS = {
         "example": "[MCP_CALL:marker/delete?all=true]"
     },
     "region/delete": {
-        "description": "Delete Region(s) by displayed Region id, id range, ids list, or name match. Do not use marker/delete for Region deletion.",
+        "description": "Delete Region(s) by displayed Region id, id range, ids list, name match, timeline order, or all=true. Selection and exclusion scopes are compiled by the generic Action Protocol selector layer. Do not use marker/delete for Region deletion.",
         "params": {
             "index": "Single Region id, for example 15 or R15",
             "start": "First Region id in a numeric range",
@@ -4759,6 +5101,11 @@ MCP_ENDPOINTS = {
             "all": "true deletes all Regions"
         },
         "example": "[MCP_CALL:region/delete?start=15&end=20]"
+    },
+    "region/set_color": {
+        "description": "Set Region color only. Supports displayed Region id/range/ids/name/all and contextual selected/current/time_selection Region scopes. This endpoint never targets Markers.",
+        "params": {"index": "Single Region id, for example 15 or R15", "range": "Region id range such as 15-20 or R15-R20", "ids": "Comma/space separated Region ids", "start": "First Region id in a numeric range", "end": "Last Region id in a numeric range", "order_start": "Timeline order start, 1-based after sorting Regions by position", "order_end": "Timeline order end, 1-based after sorting Regions by position", "name": "Substring match for Region name", "match": "Alias of name", "selected": "true uses ReaperAI's inferred selected Region from the time selection", "scope": "selected/current/time_selection", "all": "true sets all Regions", "color": "Color name, #RRGGBB, r,g,b, or default/clear"},
+        "example": "[MCP_CALL:region/set_color?selected=true&color=黄色]"
     },
     "item/fade": {
         "description": "设置素材自身淡入/淡出长度，只修改 item 的 D_FADEINLEN/D_FADEOUTLEN，不写包络；默认作用于选中素材",
@@ -4980,7 +5327,7 @@ if __name__ == "__main__":
     print(f"  POST /submit_result - Submit execution results")
     print(f"\nQuick Actions:")
     print(f"  POST /track/create, /track/add_fx")
-    print(f"  POST /marker/add, /marker/delete, /region/delete")
+    print(f"  POST /marker/add, /marker/delete, /region/delete, /region/set_color, /item/set_color")
     print(f"\nPress Ctrl+C to stop\n")
 
     app.run(host=args.host, port=args.port, debug=False)

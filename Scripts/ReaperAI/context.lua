@@ -167,6 +167,27 @@ function Context.create(opts)
       table.insert(lines, string.format("时间选区: %.3fs - %.3fs (%.3fs)",
         time_sel_start, time_sel_end, time_sel_end - time_sel_start))
     end
+    if reaper.GetSelectedEnvelope then
+      local selected_env = reaper.GetSelectedEnvelope(0)
+      table.insert(lines, "选中包络: " .. (selected_env and "有" or "无"))
+    end
+
+    local selector_current_items = 0
+    local selector_time_items = 0
+    for i = 0, reaper.CountMediaItems(0) - 1 do
+      local item = reaper.GetMediaItem(0, i)
+      if item then
+        local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+        local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+        if cursor_pos >= pos - 0.001 and cursor_pos <= pos + len + 0.001 then
+          selector_current_items = selector_current_items + 1
+        end
+        if time_sel_start ~= time_sel_end and (pos + len) > time_sel_start + 0.001 and pos < time_sel_end - 0.001 then
+          selector_time_items = selector_time_items + 1
+        end
+      end
+    end
+    table.insert(lines, string.format("Selector candidates: selected_tracks=%d, selected_items=%d, current_items=%d, time_selection_items=%d", #selected_tracks, #sel_items, selector_current_items, selector_time_items))
 
     table.insert(lines, "")
     local cursor_region_info = {}
@@ -211,6 +232,52 @@ function Context.create(opts)
         end
       end
     end
+
+    local function ranges_overlap(a_start, a_end, b_start, b_end)
+      return (a_end or 0) > (b_start or 0) + 0.001 and (a_start or 0) < (b_end or 0) - 0.001
+    end
+
+    local function close_enough(a, b)
+      return math.abs((a or 0) - (b or 0)) <= 0.001
+    end
+
+    local function choose_region_selection_candidates()
+      if time_sel_start == time_sel_end then return {}, "" end
+      local exact = {}
+      local contained = {}
+      local overlap = {}
+      for _, entry in ipairs(live_region_entries) do
+        local pos = entry.pos or 0
+        local rgnend = entry["end"] or 0
+        if close_enough(pos, time_sel_start) and close_enough(rgnend, time_sel_end) then
+          table.insert(exact, entry)
+        elseif pos >= time_sel_start - 0.001 and rgnend <= time_sel_end + 0.001 then
+          table.insert(contained, entry)
+        elseif ranges_overlap(pos, rgnend, time_sel_start, time_sel_end) then
+          table.insert(overlap, entry)
+        end
+      end
+      if #exact > 0 then return exact, "时间选区精确匹配" end
+      if #contained > 0 then return contained, "时间选区完全包含" end
+      if #overlap > 0 then return overlap, "时间选区重叠" end
+      return {}, ""
+    end
+
+    local inferred_regions, inferred_region_source = choose_region_selection_candidates()
+    table.insert(lines, "")
+    if #inferred_regions > 0 then
+      table.insert(lines, "推断选中 Region (" .. #inferred_regions .. "个，来源: " .. inferred_region_source .. "):")
+      for _, r in ipairs(inferred_regions) do
+        table.insert(lines, string.format("  [R%d] %s (%.3fs - %.3fs)",
+          r.index or 0, r.name or "", r.pos or 0, r["end"] or 0))
+      end
+      table.insert(lines, "Region selector hint: 用户说“选中的 Region/选中区域”时，使用 ACTION_PLAN 的 region.delete scope=selected；保留选中并删除其他时使用 region.delete scope=all exclude=selected。")
+    else
+      table.insert(lines, "推断选中 Region: 无（REAPER 未提供稳定的显式 Region 选择 API；当前只能由时间选区推断）")
+    end
+
+    table.insert(lines, "Generic selector hint: contextual selection candidates are resolved by ACTION_PLAN scope/exclude. Use region.delete scope=selected/current/time_selection or scope=all exclude=selected; do not use region/delete?selected=true or keep_selected=true.")
+    table.insert(lines, "Color endpoint hint: track color uses track/set_color; item color uses item/set_color; Region color uses region/set_color. Region and Marker are separate objects; never use Marker operations for Region color.")
 
     if #cursor_region_info > 0 then
       table.insert(lines, "光标所在位置:")

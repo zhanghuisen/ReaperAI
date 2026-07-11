@@ -48,6 +48,10 @@ def write_worker_failure(worker_args: list[str], message: str) -> None:
         pass
 
 
+def cancel_requested(path: Path | None) -> bool:
+    return bool(path and path.exists())
+
+
 def popen_hidden(args: list[str], cwd: Path, log_path: Path | None) -> subprocess.Popen:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -292,11 +296,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", required=True)
     parser.add_argument("--log", default="")
+    parser.add_argument("--pid-file", default="")
+    parser.add_argument("--cancel-file", default="")
     parser.add_argument("worker_args", nargs=argparse.REMAINDER)
     ns = parser.parse_args()
 
     worker = Path(ns.worker).resolve()
     log_path = Path(ns.log).resolve() if ns.log else None
+    pid_path = Path(ns.pid_file).resolve() if ns.pid_file else None
+    cancel_path = Path(ns.cancel_file).resolve() if ns.cancel_file else None
     worker_args = list(ns.worker_args)
     if worker_args and worker_args[0] == "--":
         worker_args = worker_args[1:]
@@ -307,14 +315,28 @@ def main() -> int:
         return 2
 
     try:
+        if cancel_requested(cancel_path):
+            write_log(log_path, "Cancelled before runtime preparation")
+            return 0
         python_exe, runtime_error = ensure_runtime(worker.parent, log_path)
+        if cancel_requested(cancel_path):
+            write_log(log_path, "Cancelled before worker launch")
+            return 0
         if runtime_error or not python_exe:
             message = runtime_error or "Python 运行环境不可用"
             write_log(log_path, message)
             write_worker_failure(worker_args, message)
             return 1
+        if cancel_requested(cancel_path):
+            write_log(log_path, "Cancelled before worker process creation")
+            return 0
         proc = popen_hidden([str(python_exe), str(worker), *worker_args], worker.parent, log_path)
         write_log(log_path, f"Started worker pid={proc.pid} python={python_exe}")
+        if pid_path:
+            try:
+                pid_path.write_text(str(proc.pid), encoding="utf-8")
+            except Exception as exc:
+                write_log(log_path, f"Failed to write pid file {pid_path}: {exc}")
         try:
             code = proc.wait(timeout=1.5)
         except subprocess.TimeoutExpired:

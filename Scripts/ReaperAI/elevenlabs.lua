@@ -15,6 +15,22 @@ local function trim_text(s)
   return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+local function normalize_provider(provider)
+  provider = trim_text(provider):lower()
+  if provider == "doubao" or provider == "volcengine" or provider == "volc" or provider == "byteplus" then
+    return "doubao"
+  end
+  return "elevenlabs"
+end
+
+local function provider_label(provider)
+  provider = normalize_provider(provider)
+  if provider == "doubao" then
+    return "火山引擎豆包"
+  end
+  return "ElevenLabs"
+end
+
 local FREE_VOICE_OPTIONS = {
   { id = "21m00Tcm4TlvDq8ikWAM", name = "Rachel", gender = "female", free = true, tags = { "standard", "default", "female", "broadcast" } },
   { id = "AZnzlk1XvdvUeBnXmlld", name = "Domi", gender = "female", free = true, tags = { "mature", "calm", "female" } },
@@ -201,6 +217,413 @@ local function parse_voice_lines(content)
   return voices
 end
 
+local DOUBAO_LANGUAGE_OPTIONS = {
+  { id = "zh_mix", label = "中英混" },
+  { id = "ja", label = "日语" },
+  { id = "id", label = "印尼语" },
+  { id = "es", label = "西班牙语" },
+}
+
+local DOUBAO_ACCENT_OPTIONS = {
+  zh_mix = {
+    { id = "default", label = "默认" },
+    { id = "dongbei", label = "东北" },
+    { id = "shaanxi", label = "陕西" },
+    { id = "sichuan", label = "四川" },
+  },
+  ja = {
+    { id = "default", label = "默认" },
+  },
+  id = {
+    { id = "default", label = "默认" },
+  },
+  es = {
+    { id = "default", label = "默认" },
+  },
+}
+
+local function doubao_language_options()
+  local out = {}
+  for _, item in ipairs(DOUBAO_LANGUAGE_OPTIONS) do
+    table.insert(out, { id = item.id, label = item.label })
+  end
+  return out
+end
+
+local function doubao_language_label(language)
+  language = trim_text(language)
+  if language == "" then language = "zh_mix" end
+  for _, item in ipairs(DOUBAO_LANGUAGE_OPTIONS) do
+    if item.id == language then return item.label end
+  end
+  return language
+end
+
+local function doubao_accent_options(language)
+  language = trim_text(language)
+  if language == "" then language = "zh_mix" end
+  local source = DOUBAO_ACCENT_OPTIONS[language] or DOUBAO_ACCENT_OPTIONS.zh_mix
+  local out = {}
+  for _, item in ipairs(source) do
+    table.insert(out, { id = item.id, label = item.label })
+  end
+  return out
+end
+
+local function doubao_default_accent(language)
+  local options = doubao_accent_options(language)
+  return (options[1] and options[1].id) or "default"
+end
+
+local function doubao_accent_label(language, accent)
+  accent = trim_text(accent)
+  if accent == "" then accent = doubao_default_accent(language) end
+  for _, item in ipairs(doubao_accent_options(language)) do
+    if item.id == accent then return item.label end
+  end
+  return accent
+end
+
+local function normalize_doubao_language(language)
+  language = trim_text(language)
+  language = language:lower()
+  if language == "" or language == "zh" or language == "zh-cn" or language == "cn" or language == "zh_cn" then
+    return "zh_mix"
+  end
+  if language == "japanese" or language == "jp" then return "ja" end
+  if language == "indonesian" or language == "in" then return "id" end
+  if language == "spanish" or language == "spa" then return "es" end
+  for _, item in ipairs(DOUBAO_LANGUAGE_OPTIONS) do
+    if item.id == language then return item.id end
+  end
+  return "zh_mix"
+end
+
+local function normalize_doubao_accent(language, accent)
+  language = normalize_doubao_language(language)
+  accent = trim_text(accent):lower()
+  if language ~= "zh_mix" then return "default" end
+  if accent == "" or accent == "standard" or accent == "mandarin" or accent == "普通话" then return "default" end
+  if accent == "northeast" or accent == "东北话" then return "dongbei" end
+  if accent == "shanxi" or accent == "陕西话" or accent == "陕北" then return "shaanxi" end
+  if accent == "sichuanese" or accent == "四川话" or accent == "川普" then return "sichuan" end
+  for _, item in ipairs(doubao_accent_options(language)) do
+    if item.id == accent then return item.id end
+  end
+  return "default"
+end
+
+local function append_unique(list, value)
+  value = trim_text(value)
+  if value == "" then return end
+  for _, item in ipairs(list) do
+    if item == value then return end
+  end
+  table.insert(list, value)
+end
+
+local function list_contains(list, value)
+  value = trim_text(value)
+  for _, item in ipairs(list or {}) do
+    if item == value then return true end
+  end
+  return false
+end
+
+local function capability_values_from_tags(tags, prefix, normalizer)
+  local out = {}
+  prefix = tostring(prefix or "")
+  for _, tag in ipairs(tags or {}) do
+    tag = trim_text(tag)
+    if tag:sub(1, #prefix) == prefix then
+      local value = trim_text(tag:sub(#prefix + 1))
+      if normalizer then value = normalizer(value) end
+      append_unique(out, value)
+    end
+  end
+  return out
+end
+
+local function copy_capability_values(value, normalizer)
+  local out = {}
+  if type(value) == "table" then
+    for _, item in ipairs(value) do
+      item = normalizer and normalizer(item) or trim_text(item)
+      append_unique(out, item)
+    end
+  elseif value and tostring(value) ~= "" then
+    for item in tostring(value):gmatch("[^,;|]+") do
+      item = normalizer and normalizer(item) or trim_text(item)
+      append_unique(out, item)
+    end
+  end
+  return out
+end
+
+local function normalize_doubao_control(control)
+  control = trim_text(control):lower()
+  if control == "speech" or control == "speech_rate" then return "speed" end
+  if control == "loudness" or control == "loudness_rate" then return "volume" end
+  if control == "pitch_rate" then return "pitch" end
+  if control == "speed" or control == "pitch" or control == "volume" then return control end
+  return ""
+end
+
+local function first_tag_value(tags, prefix)
+  prefix = tostring(prefix or "")
+  for _, tag in ipairs(tags or {}) do
+    tag = trim_text(tag)
+    if tag:sub(1, #prefix) == prefix then
+      return trim_text(tag:sub(#prefix + 1))
+    end
+  end
+  return ""
+end
+
+local function copy_doubao_voice(voice)
+  if type(voice) ~= "table" then return nil end
+  local id = trim_text(voice.id or voice.voice_id or voice.speaker or voice.speaker_id or "")
+  if id == "" then return nil end
+  local tags = copy_tags(voice.tags)
+  local language = trim_text(voice.language or voice.lang or "")
+  if language ~= "" then language = normalize_doubao_language(language) end
+  local accent = trim_text(voice.accent or voice.dialect or "")
+  if accent ~= "" then accent = normalize_doubao_accent(language ~= "" and language or "zh_mix", accent) end
+  local languages = copy_capability_values(voice.languages or voice.langs or voice.supported_languages, normalize_doubao_language)
+  for _, item in ipairs(capability_values_from_tags(tags, "lang:", normalize_doubao_language)) do append_unique(languages, item) end
+  if #languages == 0 and language ~= "" then append_unique(languages, language) end
+  if #languages == 0 then append_unique(languages, "zh_mix") end
+  local accents = copy_capability_values(voice.accents or voice.dialects or voice.supported_dialects, function(item)
+    return normalize_doubao_accent("zh_mix", item)
+  end)
+  for _, item in ipairs(capability_values_from_tags(tags, "accent:", function(value)
+    return normalize_doubao_accent("zh_mix", value)
+  end)) do append_unique(accents, item) end
+  if #accents == 0 and accent ~= "" then append_unique(accents, accent) end
+  if #accents == 0 then append_unique(accents, "default") end
+  local controls = { speed = true, pitch = true, volume = true }
+  local tagged_controls = capability_values_from_tags(tags, "control:", normalize_doubao_control)
+  if #tagged_controls > 0 then
+    controls = { speed = false, pitch = false, volume = false }
+    for _, control in ipairs(tagged_controls) do
+      if control ~= "" then controls[control] = true end
+    end
+  end
+  local resource_id = trim_text(voice.resource_id or voice.resource or first_tag_value(tags, "resource:"))
+  local known = true
+  for _, tag in ipairs(tags) do
+    if tag == "cap:unknown" then known = false end
+  end
+  local available_value = voice.available
+  if type(available_value) == "string" then
+    local lower = available_value:lower()
+    available_value = lower == "1" or lower == "true" or lower == "yes" or lower == "available" or lower == "verified" or lower == "ready" or lower == "success"
+  elseif type(available_value) == "number" then
+    available_value = available_value ~= 0
+  end
+  return {
+    id = id,
+    name = trim_text(voice.name or voice.label or voice.alias or id),
+    language = language,
+    accent = accent,
+    source = trim_text(voice.source or "account"),
+    tags = tags,
+    languages = languages,
+    accents = accents,
+    controls = controls,
+    resource_id = resource_id,
+    capabilities_known = known,
+    available = available_value ~= false,
+  }
+end
+
+local function parse_doubao_voice_lines(content)
+  local voices = {}
+  for line in tostring(content or ""):gmatch("[^\r\n]+") do
+    line = trim_text(line)
+    if line ~= "" and not line:match("^#") then
+      local fields = {}
+      for field in (line .. "\t"):gmatch("([^\t]*)\t") do
+        table.insert(fields, field)
+      end
+      local voice = copy_doubao_voice({
+        id = fields[1] or "",
+        name = fields[2] or "",
+        language = fields[3] or "",
+        accent = fields[4] or "",
+        source = fields[5] or "",
+        tags = fields[6] or "",
+        available = fields[7] or "",
+      })
+      if voice then table.insert(voices, voice) end
+    end
+  end
+  return voices
+end
+
+local function doubao_voice_by_id(voice_id, dynamic_voices)
+  voice_id = trim_text(voice_id)
+  if voice_id == "" then return nil end
+  for _, voice in ipairs(dynamic_voices or {}) do
+    if tostring(voice.id or voice.voice_id or voice.speaker or "") == voice_id then
+      return copy_doubao_voice(voice)
+    end
+  end
+  return nil
+end
+
+local function doubao_voice_matches(language, accent, voice)
+  voice = copy_doubao_voice(voice)
+  if not voice then return false end
+  language = normalize_doubao_language(language)
+  accent = normalize_doubao_accent(language, accent)
+  if not list_contains(voice.languages, language) then return false end
+  if language == "zh_mix" and not list_contains(voice.accents, accent) then return false end
+  return voice.available ~= false
+end
+
+local function doubao_voice_options(language, accent, dynamic_voices)
+  local out, seen = {}, {}
+  for _, voice in ipairs(dynamic_voices or {}) do
+    voice = copy_doubao_voice(voice)
+    if voice and not seen[voice.id] and doubao_voice_matches(language, accent, voice) then
+      seen[voice.id] = true
+      table.insert(out, voice)
+    end
+  end
+  return out
+end
+
+local function doubao_voice_all_options(dynamic_voices)
+  local out, seen = {}, {}
+  for _, voice in ipairs(dynamic_voices or {}) do
+    voice = copy_doubao_voice(voice)
+    if voice and voice.available ~= false and not seen[voice.id] then
+      seen[voice.id] = true
+      table.insert(out, voice)
+    end
+  end
+  return out
+end
+
+local function doubao_voice_language_options(voice)
+  voice = copy_doubao_voice(voice)
+  local out = {}
+  if not voice then return doubao_language_options() end
+  for _, language in ipairs(voice.languages or {}) do
+    table.insert(out, { id = language, label = doubao_language_label(language) })
+  end
+  if #out == 0 then table.insert(out, { id = "zh_mix", label = doubao_language_label("zh_mix") }) end
+  return out
+end
+
+local function doubao_voice_accent_options(voice, language)
+  voice = copy_doubao_voice(voice)
+  language = normalize_doubao_language(language)
+  if not voice or language ~= "zh_mix" then return { { id = "default", label = doubao_accent_label(language, "default") } } end
+  local out = {}
+  for _, accent in ipairs(voice.accents or {}) do
+    table.insert(out, { id = accent, label = doubao_accent_label(language, accent) })
+  end
+  if #out == 0 then table.insert(out, { id = "default", label = doubao_accent_label(language, "default") }) end
+  return out
+end
+
+local function doubao_voice_default_language(voice)
+  voice = copy_doubao_voice(voice)
+  if not voice or not voice.languages or not voice.languages[1] then return "zh_mix" end
+  return voice.languages[1]
+end
+
+local function doubao_voice_default_accent(voice, language)
+  language = normalize_doubao_language(language)
+  local options = doubao_voice_accent_options(voice, language)
+  for _, item in ipairs(options) do
+    if item.id == "default" then return "default" end
+  end
+  return (options[1] and options[1].id) or "default"
+end
+
+local function doubao_voice_supports_language(voice, language)
+  voice = copy_doubao_voice(voice)
+  if not voice then return false end
+  return list_contains(voice.languages, normalize_doubao_language(language))
+end
+
+local function doubao_voice_supports_accent(voice, language, accent)
+  voice = copy_doubao_voice(voice)
+  if not voice then return false end
+  language = normalize_doubao_language(language)
+  accent = normalize_doubao_accent(language, accent)
+  if language ~= "zh_mix" then return true end
+  return list_contains(voice.accents, accent)
+end
+
+local function doubao_voice_label(voice)
+  voice = copy_doubao_voice(voice)
+  if not voice then return "手动音色ID" end
+  local parts = { voice.name ~= "" and voice.name or voice.id }
+  if #voice.languages > 1 then
+    table.insert(parts, "多语种")
+  elseif voice.languages[1] then
+    table.insert(parts, doubao_language_label(voice.languages[1]))
+  end
+  if list_contains(voice.accents, "dongbei") or list_contains(voice.accents, "shaanxi") or list_contains(voice.accents, "sichuan") then
+    table.insert(parts, "多口音")
+  elseif voice.accents[1] and voice.accents[1] ~= "default" then
+    table.insert(parts, doubao_accent_label("zh_mix", voice.accents[1]))
+  end
+  if voice.capabilities_known == false then table.insert(parts, "能力未知") end
+  return table.concat(parts, " · ")
+end
+
+local function doubao_voice_menu_label(voice)
+  voice = copy_doubao_voice(voice)
+  if not voice then return "手动音色ID" end
+  return doubao_voice_label(voice) .. "##doubao_voice_" .. voice.id
+end
+
+local function doubao_voice_matches_filter(voice, filter)
+  filter = trim_text(filter):lower()
+  if filter == "" then return true end
+  voice = copy_doubao_voice(voice)
+  if not voice then return false end
+  local haystack = {
+    voice.id or "",
+    voice.name or "",
+    voice.language or "",
+    voice.accent or "",
+    table.concat(voice.languages or {}, " "),
+    table.concat(voice.accents or {}, " "),
+    table.concat(voice.tags or {}, " "),
+  }
+  for _, language in ipairs(voice.languages or {}) do
+    table.insert(haystack, doubao_language_label(language))
+  end
+  for _, accent in ipairs(voice.accents or {}) do
+    table.insert(haystack, doubao_accent_label("zh_mix", accent))
+  end
+  return table.concat(haystack, " "):lower():find(filter, 1, true) ~= nil
+end
+
+local function doubao_voice_supports(language, accent, voice)
+  return doubao_voice_matches(language, accent, voice)
+end
+
+local function doubao_voice_supports_control(voice, control)
+  voice = copy_doubao_voice(voice)
+  if not voice then return true end
+  control = normalize_doubao_control(control)
+  if control == "" then return true end
+  return voice.controls and voice.controls[control] ~= false
+end
+
+local function doubao_voice_resource_id(voice)
+  voice = copy_doubao_voice(voice)
+  if not voice then return "" end
+  return voice.resource_id or ""
+end
+
 local function json_string(s)
   return '"' .. esc(s) .. '"'
 end
@@ -335,16 +758,24 @@ local function strip_audio_track_prefix(name)
   name = name:gsub("^11[_%s%-]*[Ss][Ff][Xx][_%s%-]*", "")
   name = name:gsub("^11[_%s%-]*[Vv][Oo][Xx][_%s%-]*", "")
   name = name:gsub("^11[_%s%-]*", "")
+  name = name:gsub("^Doubao[_%s%-]*", "")
+  name = name:gsub("^豆包[_%s%-]*", "")
   return trim_text(name)
 end
 
-local function elevenlabs_track_name(mode, candidate, req)
+local function audio_track_name(provider, mode, candidate, req)
+  provider = normalize_provider(provider)
   mode = (mode == "vox") and "vox" or "sfx"
   local base = strip_audio_track_prefix(candidate or "")
+  local provider_name = (provider == "doubao") and "Doubao" or "ElevenLabs"
   if base ~= "" then
-    return safe_track_name(base, (mode == "vox") and "ElevenLabs VOX" or "ElevenLabs SFX")
+    return safe_track_name(base, provider_name .. " " .. ((mode == "vox") and "VOX" or "SFX"))
   end
-  return (mode == "vox") and "ElevenLabs VOX" or "ElevenLabs SFX"
+  return provider_name .. " " .. ((mode == "vox") and "VOX" or "SFX")
+end
+
+local function elevenlabs_track_name(mode, candidate, req)
+  return audio_track_name("elevenlabs", mode, candidate, req)
 end
 
 local function contains_any(text, words)
@@ -466,12 +897,43 @@ function ElevenLabs.normalize_request(input)
     req = parse_audio_shortcut(input)
   end
 
+  req.provider = normalize_provider(req.provider or req.service or req.vendor or "")
   req.mode = tostring(req.mode or ""):lower()
   if req.mode ~= "vox" and req.mode ~= "sfx" then
     req.mode = "sfx"
   end
 
-  if req.mode == "vox" then
+  if req.provider == "doubao" then
+    req.language = normalize_doubao_language(req.language or req.lang or "")
+    req.accent = normalize_doubao_accent(req.language, req.accent or req.dialect or "")
+    req.speed_ratio = tonumber(req.speed_ratio or req.speed or req.speech_rate) or 1.0
+    req.pitch_ratio = tonumber(req.pitch_ratio or req.pitch) or 1.0
+    req.volume_ratio = tonumber(req.volume_ratio or req.volume) or 1.0
+    if req.mode == "vox" then
+      req.speaker = trim_text(req.speaker or req.voice_id or req.voice or "")
+      req.speaker_name = trim_text(req.speaker_name or req.voice_name or "")
+      req.voice_style = trim_text(req.voice_style or req.style or "")
+      req.performance_prompt = trim_text(req.performance_prompt or req.performance or req.tone or "")
+      req.performance = req.performance_prompt
+      req.spoken_text = trim_text(req.spoken_text or req.text or req.prompt or req.description or "")
+      req.text_prompt = trim_text(req.text_prompt or req.prompt or req.text or "")
+      if req.text_prompt == "" and req.spoken_text ~= "" then
+        if req.performance_prompt ~= "" then
+          req.text_prompt = req.performance_prompt .. "：" .. req.spoken_text
+        else
+          req.text_prompt = req.spoken_text
+        end
+      end
+      req.track_name = audio_track_name("doubao", "vox", req.track_name, req)
+    else
+      req.prompt = trim_text(req.prompt or req.description or req.text or req.source_text or "")
+      req.text_prompt = trim_text(req.text_prompt or req.prompt)
+      req.track_name = audio_track_name("doubao", "sfx", req.track_name, req)
+    end
+    req.format = trim_text(req.format or "wav"):lower()
+    if req.format == "" then req.format = "wav" end
+    req.resource_id = trim_text(req.resource_id or "")
+  elseif req.mode == "vox" then
     req.voice_style = trim_text(req.voice_style or req.style or "")
     req.performance_prompt = trim_text(req.performance_prompt or req.performance or req.tone or req.emotion or "")
     req.performance = req.performance_prompt
@@ -495,11 +957,21 @@ function ElevenLabs.normalize_request(input)
 end
 
 function ElevenLabs.request_json(req)
+  local provider = normalize_provider(req.provider or req.service or req.vendor or "")
   local parts = {
     "{",
-    '"mode":', json_string(req.mode),
+    '"provider":', json_string(provider),
+    ',"mode":', json_string(req.mode),
     ',"track_name":', json_string(req.track_name),
     ',"prompt":', json_string(req.prompt or ""),
+    ',"text_prompt":', json_string(req.text_prompt or req.prompt or ""),
+    ',"speaker":', json_string(req.speaker or ""),
+    ',"speaker_name":', json_string(req.speaker_name or ""),
+    ',"language":', json_string(req.language or ""),
+    ',"accent":', json_string(req.accent or ""),
+    ',"speed_ratio":', tostring(tonumber(req.speed_ratio) or 1.0),
+    ',"pitch_ratio":', tostring(tonumber(req.pitch_ratio) or 1.0),
+    ',"volume_ratio":', tostring(tonumber(req.volume_ratio) or 1.0),
     ',"gender":', json_string(req.gender or ""),
     ',"voice_style":', json_string(req.voice_style or ""),
     ',"performance":', json_string(req.performance or ""),
@@ -508,6 +980,8 @@ function ElevenLabs.request_json(req)
     ',"spoken_text":', json_string(req.spoken_text or ""),
     ',"source_text":', json_string(req.source_text or ""),
     ',"output_dir":', json_string(req.output_dir or ""),
+    ',"format":', json_string(req.format or ""),
+    ',"resource_id":', json_string(req.resource_id or ""),
     ',"semantic_parse":', (req.semantic_parse and "true" or "false"),
     "}"
   }
@@ -515,14 +989,26 @@ function ElevenLabs.request_json(req)
 end
 
 function ElevenLabs.start_message(req)
+  local provider = provider_label(req.provider)
   if req.mode == "vox" then
     if req.semantic_parse then
-      return "正在解析并生成 VOX: " .. tostring(req.source_text or req.spoken_text or "")
+      return "正在用 " .. provider .. " 解析并生成 VOX: " .. tostring(req.source_text or req.spoken_text or "")
     end
     local style = trim_text(((req.gender == "male") and "男声" or "女声") .. " " .. tostring(req.voice_style or "") .. " " .. tostring(req.performance_prompt or req.performance or ""))
-    return "正在生成 VOX: " .. tostring(req.spoken_text or "") .. "\n声音: " .. style
+    if normalize_provider(req.provider) == "doubao" then
+      local speaker = trim_text(req.speaker or "")
+      local speaker_name = trim_text(req.speaker_name or "")
+      local speaker_label = speaker_name ~= "" and speaker_name or speaker
+      local speaker_text = speaker_label ~= "" and ("声线: " .. speaker_label .. "\n") or ""
+      local language_text = "语言: " .. doubao_language_label(req.language) .. " / " .. doubao_accent_label(req.language, req.accent) .. "\n"
+      return "正在用 " .. provider .. " 生成 VOX: " .. tostring(req.spoken_text or "") .. "\n" .. speaker_text .. language_text .. "提示: " .. tostring(req.text_prompt or "")
+    end
+    return "正在用 " .. provider .. " 生成 VOX: " .. tostring(req.spoken_text or "") .. "\n声音: " .. style
   end
-  return "正在生成 SFX: " .. tostring(req.prompt or "")
+  if normalize_provider(req.provider) == "doubao" then
+    return "正在用 " .. provider .. " 生成 SFX: " .. tostring(req.text_prompt or req.prompt or "")
+  end
+  return "正在用 " .. provider .. " 生成 SFX: " .. tostring(req.prompt or "")
 end
 
 function ElevenLabs.parse_worker_response(response)
@@ -683,6 +1169,9 @@ function ElevenLabs.build_import_script(track_name, wav_path)
 end
 
 ElevenLabs.trim_text = trim_text
+ElevenLabs.normalize_provider = normalize_provider
+ElevenLabs.provider_label = provider_label
+ElevenLabs.audio_track_name = audio_track_name
 ElevenLabs.safe_track_name = safe_track_name
 ElevenLabs.elevenlabs_track_name = elevenlabs_track_name
 ElevenLabs.utf8_safe_sub = utf8_safe_sub
@@ -696,5 +1185,28 @@ ElevenLabs.voice_label = voice_label
 ElevenLabs.voice_menu_label = voice_menu_label
 ElevenLabs.voice_matches_filter = voice_matches_filter
 ElevenLabs.parse_voice_lines = parse_voice_lines
+ElevenLabs.doubao_language_options = doubao_language_options
+ElevenLabs.doubao_language_label = doubao_language_label
+ElevenLabs.doubao_accent_options = doubao_accent_options
+ElevenLabs.doubao_default_accent = doubao_default_accent
+ElevenLabs.doubao_accent_label = doubao_accent_label
+ElevenLabs.normalize_doubao_language = normalize_doubao_language
+ElevenLabs.normalize_doubao_accent = normalize_doubao_accent
+ElevenLabs.parse_doubao_voice_lines = parse_doubao_voice_lines
+ElevenLabs.doubao_voice_by_id = doubao_voice_by_id
+ElevenLabs.doubao_voice_options = doubao_voice_options
+ElevenLabs.doubao_voice_all_options = doubao_voice_all_options
+ElevenLabs.doubao_voice_language_options = doubao_voice_language_options
+ElevenLabs.doubao_voice_accent_options = doubao_voice_accent_options
+ElevenLabs.doubao_voice_default_language = doubao_voice_default_language
+ElevenLabs.doubao_voice_default_accent = doubao_voice_default_accent
+ElevenLabs.doubao_voice_supports_language = doubao_voice_supports_language
+ElevenLabs.doubao_voice_supports_accent = doubao_voice_supports_accent
+ElevenLabs.doubao_voice_label = doubao_voice_label
+ElevenLabs.doubao_voice_menu_label = doubao_voice_menu_label
+ElevenLabs.doubao_voice_matches_filter = doubao_voice_matches_filter
+ElevenLabs.doubao_voice_supports = doubao_voice_supports
+ElevenLabs.doubao_voice_supports_control = doubao_voice_supports_control
+ElevenLabs.doubao_voice_resource_id = doubao_voice_resource_id
 
 return ElevenLabs

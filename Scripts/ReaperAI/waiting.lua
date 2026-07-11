@@ -18,13 +18,13 @@ local WAIT_PHASES = {
   audio_vox = {
     {0, "正在解析 VOX 语义..."},
     {3, "正在选择声音..."},
-    {7, "正在等待 ElevenLabs 生成语音..."},
+    {7, "正在等待 {{provider}} 生成语音..."},
     {15, "正在准备导入 REAPER..."},
   },
   audio_sfx = {
     {0, "正在解析 SFX 描述..."},
     {3, "正在准备音效提示词..."},
-    {7, "正在等待 ElevenLabs 生成音效..."},
+    {7, "正在等待 {{provider}} 生成音效..."},
     {18, "正在准备导入 REAPER..."},
   },
   generic = {
@@ -43,7 +43,7 @@ local function now_seconds()
   return os.clock()
 end
 
-function Waiting.phase_text(kind, elapsed)
+function Waiting.phase_text(kind, elapsed, provider_label)
   local phases = WAIT_PHASES[kind or ""] or WAIT_PHASES.generic
   elapsed = tonumber(elapsed or 0) or 0
   local text = phases[1] and phases[1][2] or "请求中..."
@@ -53,6 +53,9 @@ function Waiting.phase_text(kind, elapsed)
     else
       break
     end
+  end
+  if text:find("{{provider}}", 1, true) then
+    text = text:gsub("{{provider}}", tostring(provider_label or "音频服务"))
   end
   return text
 end
@@ -76,7 +79,8 @@ end
 function Waiting.update(state)
   if not state or not state.waiting then return end
   local elapsed = now_seconds() - (state.wait_started_at or now_seconds())
-  local text = Waiting.phase_text(state.wait_kind, elapsed)
+  local provider_label = state.audio_waiting and state.audio_wait_provider_label or nil
+  local text = Waiting.phase_text(state.wait_kind, elapsed, provider_label)
   state.status = text
   if state.audio_waiting then
     state.audio_status = text
@@ -125,13 +129,15 @@ function Waiting.clear_operation_placeholder(state)
   end
 end
 
-function Waiting.begin_audio_request(state, mode)
+function Waiting.begin_audio_request(state, mode, provider_label)
   if not state then return end
   state.audio_pending_count = (state.audio_pending_count or 0) + 1
   state.audio_waiting = true
   state.audio_wait_kind = (mode == "vox") and "audio_vox" or "audio_sfx"
+  state.audio_wait_provider_label = tostring(provider_label or "音频服务")
   state.audio_started_at = now_seconds()
   Waiting.start(state, state.audio_wait_kind, "")
+  state.status = Waiting.phase_text(state.audio_wait_kind, 0, state.audio_wait_provider_label)
   state.audio_status = state.status
 end
 
@@ -142,6 +148,7 @@ function Waiting.finish_audio_request(state, text)
   state.audio_status = tostring(text or state.audio_status or "")
   if not state.audio_waiting then
     state.audio_wait_kind = ""
+    state.audio_wait_provider_label = ""
     state.audio_started_at = 0
   end
 end

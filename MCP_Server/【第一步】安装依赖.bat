@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>nul
-title ReaperAI v1.0.4 - Install dependencies
+title ReaperAI v1.0.5 - Install dependencies
 
 set "PYTHON_VERSION=3.11.9"
 set "SCRIPT_DIR=%~dp0"
@@ -32,7 +32,7 @@ if /i "%~1"=="--self-test" (
 if exist "%LOG_FILE%" del /f /q "%LOG_FILE%" >nul 2>nul
 
 echo ============================================
-echo   ReaperAI v1.0.4 - Dependency Launcher
+echo   ReaperAI v1.0.5 - Dependency Launcher
 echo ============================================
 echo.
 echo Preparing private Python runtime and dependency installer.

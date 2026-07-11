@@ -64,7 +64,7 @@ if #candidates == 0 then
     "GetTrack", "GetTrackGUID", "GetTrackMediaItem", "GetTrackName",
     "InsertMedia", "InsertTrackAtIndex", "Main_OnCommand", "SetEditCurPos",
     "PCM_Sink_Enum", "PCM_Sink_GetExtension", "PCM_Source_GetSectionInfo",
-    "SetMediaItemInfo_Value", "SetMediaItemTake_Source", "SetProjectMarker", "SetTrackSelected",
+    "SetMediaItemInfo_Value", "SetMediaItemTake_Source", "SetProjectMarker", "SetProjectMarker3", "SetTrackSelected",
     "TrackFX_AddByName", "TrackFX_Delete", "TrackFX_GetCount", "TrackFX_GetFXName",
     "UpdateArrange", "UpdateTimeline", "time_precise",
   }
