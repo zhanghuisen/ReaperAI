@@ -1645,7 +1645,7 @@ def generate_delete_marker_lua(params):
     end_value = str(params.get('end', params.get('to', '')) or '').strip()
     name_value = lua_escape_string(params.get('name', params.get('match', '')))
     all_markers = _targets_all(params) or str(params.get('markers', '')).strip().lower() in ('all', '全部', '所有')
-    if all_markers or ids or range_value or start_value or end_value or name_value:
+    if all_markers or idx or ids or range_value or start_value or end_value or name_value:
         return f'''
 local raw_index = "{lua_escape_string(idx)}"
 local raw_ids = "{lua_escape_string(ids)}"
@@ -1711,13 +1711,8 @@ reaper.UpdateArrange()
 if deleted == 0 then return "ERROR: No matching Marker found." end
 return "Deleted " .. tostring(deleted) .. " Marker(s): " .. table.concat(labels, ", ")
 '''
-    if not _is_int_string(idx):
-        return '''
-return "ERROR: marker/delete requires explicit marker index; refused to default to marker #0."
-'''
-    return f'''
-reaper.DeleteProjectMarker(0, {idx}, false)
-return "Deleted marker {idx}"
+    return '''
+return "ERROR: marker/delete requires explicit marker index, ids, range, name/match, or all=true."
 '''
 
 def first_nonempty_param(params, keys):
@@ -4744,7 +4739,7 @@ MCP_ENDPOINTS = {
         "example": "[MCP_CALL:marker/add?name=Verse]"
     },
     "marker/delete": {
-        "description": "删除标记",
+        "description": "删除 Marker；永远只删除 isrgn=false 的 Marker，保留所有 Region。删除 Region 必须使用 region/delete。",
         "params": {"index": "单个 Marker id", "ids": "逗号/空格分隔的 Marker id 列表", "range": "Marker id 范围，如 1-5", "start": "Marker id 范围起点", "end": "Marker id 范围终点", "name": "按 Marker 名称包含匹配", "match": "name 的别名", "all": "true 表示删除所有 Marker，但保留 Region"},
         "example": "[MCP_CALL:marker/delete?all=true]"
     },

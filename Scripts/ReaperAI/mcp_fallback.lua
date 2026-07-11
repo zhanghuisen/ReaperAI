@@ -1118,7 +1118,7 @@ function McpFallback.create()
       local start_id = params.start or params.from or ""
       local end_id = params["end"] or params.to or ""
       local name = params.name or params.match or ""
-      if targets_all(params) or all_token(params.markers) or ids ~= "" or range ~= "" or start_id ~= "" or end_id ~= "" or name ~= "" then
+      if targets_all(params) or all_token(params.markers) or idx ~= "" or ids ~= "" or range ~= "" or start_id ~= "" or end_id ~= "" or name ~= "" then
         lua_code = "local raw_index = " .. lua_quote(idx) .. "\n"
         lua_code = lua_code .. "local raw_ids = " .. lua_quote(ids) .. "\n"
         lua_code = lua_code .. "local raw_range = " .. lua_quote(range) .. "\n"
@@ -1142,12 +1142,8 @@ function McpFallback.create()
         lua_code = lua_code .. "table.sort(targets,function(a,b) return (a.id or 0) > (b.id or 0) end)\n"
         lua_code = lua_code .. "local deleted=0; local labels={}; for _,marker in ipairs(targets) do if marker.id and reaper.DeleteProjectMarker(0, marker.id, false) then deleted=deleted+1; if #labels < 8 then table.insert(labels,'M'..tostring(marker.id)) end end end\n"
         lua_code = lua_code .. "reaper.UpdateTimeline(); reaper.UpdateArrange(); if deleted == 0 then return 'ERROR: No matching Marker found' end; return 'Deleted ' .. deleted .. ' Marker(s): ' .. table.concat(labels, ', ')"
-      elseif tonumber(idx) == nil then
-        lua_code = "return '✗ marker/delete 需要明确 index，不能默认删除 #0'"
       else
-        lua_code = "reaper.DeleteProjectMarker(0, " .. tostring(idx) .. ", false)\n"
-        lua_code = lua_code .. "reaper.UpdateTimeline()\n"
-        lua_code = lua_code .. "return '已删除标记 #" .. tostring(idx) .. "'"
+        lua_code = "return '✗ marker/delete 需要明确 index/ids/range/name/all 参数'"
       end
       desc = "marker/delete (本地fallback)"
 
