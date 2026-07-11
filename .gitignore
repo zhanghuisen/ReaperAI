@@ -10,6 +10,10 @@ MCP_Server/venv/
 MCP_Server/python_runtime/
 MCP_Server/python_path.txt
 MCP_Server/pythonw_path.txt
+MCP_Server/ffmpeg_path.txt
+MCP_Server/ffmpeg/
+MCP_Server/tools/ffmpeg/
+MCP_Server/installers/ffmpeg*.zip
 MCP_Server/mcp_server_*.log
 MCP_Server/mcp_server_status.json
 MCP_Server/mcp_server_endpoints.json

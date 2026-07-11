@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import shutil
 import sys
 import tempfile
@@ -13,8 +14,8 @@ from pathlib import Path
 
 
 FFMPEG_URLS = (
-    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
 )
 
 
@@ -83,6 +84,107 @@ def normalize_user_path(value: str) -> str:
     return value
 
 
+def ffmpeg_path_file(mcp_dir: Path) -> Path:
+    return mcp_dir / "ffmpeg_path.txt"
+
+
+def read_ffmpeg_path_file(mcp_dir: Path) -> str:
+    path_file = ffmpeg_path_file(mcp_dir)
+    try:
+        value = normalize_user_path(path_file.read_text(encoding="utf-8").strip())
+    except OSError:
+        return ""
+    return value
+
+
+def validate_ffmpeg(ffmpeg_exe: str | Path) -> Path | None:
+    raw = normalize_user_path(str(ffmpeg_exe or ""))
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.name.lower() != "ffmpeg.exe" and os.name == "nt":
+        path = path / "ffmpeg.exe"
+    if not path.exists():
+        return None
+
+    kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "timeout": 8,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run([str(path), "-version"], **kwargs)
+    except Exception:
+        return None
+    return path.resolve() if result.returncode == 0 else None
+
+
+def candidate_ffmpeg_paths(mcp_dir: Path, config_path: Path | None = None) -> list[str]:
+    candidates: list[str] = []
+
+    def add(value: str | Path | None) -> None:
+        if value is None:
+            return
+        text = normalize_user_path(str(value))
+        if text and text not in candidates:
+            candidates.append(text)
+
+    add(read_ffmpeg_path_file(mcp_dir))
+    if config_path and config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            add(config.get("ffmpeg_path"))
+        except Exception:
+            pass
+
+    add(os.environ.get("REAPERAI_FFMPEG_PATH"))
+    add(os.environ.get("FFMPEG_PATH"))
+
+    add(mcp_dir / "ffmpeg" / "bin" / "ffmpeg.exe")
+    add(mcp_dir / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe")
+    add(mcp_dir / "ffmpeg.exe")
+    add(mcp_dir / "tools" / "ffmpeg.exe")
+
+    system_ffmpeg = shutil.which("ffmpeg")
+    add(system_ffmpeg)
+
+    if os.name == "nt":
+        add(r"C:\ffmpeg\bin\ffmpeg.exe")
+        add(r"C:\Program Files\ffmpeg\bin\ffmpeg.exe")
+        add(r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe")
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        if local_appdata:
+            add(Path(local_appdata) / "Microsoft" / "WinGet" / "Packages")
+
+    return candidates
+
+
+def remember_ffmpeg_path(mcp_dir: Path, config_path: Path | None, ffmpeg_exe: str | Path) -> None:
+    ffmpeg_path = str(Path(ffmpeg_exe).resolve())
+    ffmpeg_path_file(mcp_dir).write_text(ffmpeg_path + "\n", encoding="utf-8")
+    if config_path:
+        data: dict = {}
+        if config_path.exists():
+            try:
+                data = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            except Exception:
+                data = {}
+        if data:
+            data["ffmpeg_path"] = ffmpeg_path
+            _write_json(config_path, data)
+
+
+def find_ffmpeg(mcp_dir: Path, config_path: Path | None = None) -> Path | None:
+    for candidate in candidate_ffmpeg_paths(mcp_dir, config_path):
+        ffmpeg = validate_ffmpeg(candidate)
+        if ffmpeg:
+            remember_ffmpeg_path(mcp_dir, config_path, ffmpeg)
+            return ffmpeg
+    return None
+
+
 def detect_reaper_resource_value() -> str:
     if os.name == "nt":
         try:
@@ -119,12 +221,22 @@ def _parse_port(port_text: str, default: int = 8765) -> int:
 
 
 def write_config_data(config_path: Path, projects_dir: str, resource_path: str, port: int) -> None:
+    old_data: dict = {}
+    if config_path.exists():
+        try:
+            old_data = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            old_data = {}
+
     data = {
         "_comment": "ReaperAI MCP Server 配置文件",
         "reaper_projects_dir": projects_dir,
         "reaper_resource_path": resource_path,
         "server": {"host": "127.0.0.1", "port": int(port)},
     }
+    ffmpeg_path = old_data.get("ffmpeg_path") or read_ffmpeg_path_file(config_path.parent)
+    if ffmpeg_path:
+        data["ffmpeg_path"] = str(ffmpeg_path)
     _write_json(config_path, data)
 
 
@@ -244,6 +356,36 @@ def install_ffmpeg_zip(zip_path: Path, ffmpeg_dir: Path) -> Path:
     return ffmpeg_exe
 
 
+def local_ffmpeg_zips(mcp_dir: Path) -> list[Path]:
+    installers = mcp_dir / "installers"
+    candidates: list[Path] = []
+    for base in (installers, mcp_dir):
+        if not base.exists():
+            continue
+        for pattern in (
+            "ffmpeg-release-essentials.zip",
+            "ffmpeg-master-latest-win64-gpl.zip",
+            "ffmpeg*.zip",
+        ):
+            for path in sorted(base.glob(pattern)):
+                if path.is_file() and path not in candidates:
+                    candidates.append(path)
+    return candidates
+
+
+def ffmpeg_download_urls() -> list[str]:
+    urls: list[str] = []
+    custom = os.environ.get("REAPERAI_FFMPEG_URLS", "")
+    for part in custom.replace(";", "\n").splitlines():
+        url = part.strip()
+        if url and url not in urls:
+            urls.append(url)
+    for url in FFMPEG_URLS:
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
 def install_ffmpeg(argv: list[str]) -> int:
     if len(argv) != 3:
         return _die("install_ffmpeg requires: zip_path ffmpeg_dir")
@@ -257,7 +399,7 @@ def set_ffmpeg_path_data(config_path: Path, ffmpeg_exe: str) -> None:
     data: dict = {}
     if config_path.exists():
         data = json.loads(config_path.read_text(encoding="utf-8-sig"))
-    data["ffmpeg_path"] = str(Path(normalize_user_path(ffmpeg_exe)))
+    data["ffmpeg_path"] = str(Path(normalize_user_path(ffmpeg_exe)).resolve())
     _write_json(config_path, data)
 
 
@@ -267,6 +409,69 @@ def set_ffmpeg_path(argv: list[str]) -> int:
 
     set_ffmpeg_path_data(Path(normalize_user_path(argv[1])), argv[2])
     return 0
+
+
+def ensure_ffmpeg(argv: list[str]) -> int:
+    mcp_dir = Path(normalize_user_path(argv[1])) if len(argv) >= 2 else Path(__file__).resolve().parent
+    mcp_dir = mcp_dir.resolve()
+    config_path = Path(normalize_user_path(argv[2])) if len(argv) >= 3 and argv[2] else mcp_dir / "config.json"
+    ffmpeg_dir = mcp_dir / "ffmpeg"
+
+    existing = find_ffmpeg(mcp_dir, config_path)
+    if existing:
+        print(f"[OK] FFmpeg 已就绪：{existing}")
+        return 0
+
+    print("[提示] 未找到可用 FFmpeg，开始强兜底安装。")
+    print("       会先使用本地 installers\\ffmpeg*.zip，再尝试网络下载。")
+
+    for zip_path in local_ffmpeg_zips(mcp_dir):
+        try:
+            print(f"[安装] 使用本地压缩包：{zip_path}")
+            ffmpeg = install_ffmpeg_zip(zip_path, ffmpeg_dir)
+            remember_ffmpeg_path(mcp_dir, config_path, ffmpeg)
+            print(f"[OK] FFmpeg 已安装：{ffmpeg}")
+            return 0
+        except Exception as exc:
+            print(f"[提示] 本地压缩包不可用：{exc}")
+
+    if _is_truthy_env("REAPERAI_FFMPEG_NO_DOWNLOAD"):
+        print("[提示] 已设置 REAPERAI_FFMPEG_NO_DOWNLOAD=1，跳过网络下载。")
+        print("[ERROR] 未找到可用 FFmpeg。")
+        print("手动兜底：")
+        print("  1. 下载 ffmpeg-release-essentials.zip 或 ffmpeg-master-latest-win64-gpl.zip")
+        print(f"  2. 放到：{mcp_dir / 'installers'}")
+        print("  3. 重新运行【第一步】安装依赖.bat")
+        return 1
+
+    zip_path = Path(tempfile.gettempdir()) / "reaperai_ffmpeg_essentials.zip"
+    for index, url in enumerate(ffmpeg_download_urls(), start=1):
+        try:
+            if zip_path.exists():
+                zip_path.unlink()
+            print(f"[下载] 来源 {index}: {url}")
+            download_to(url, zip_path)
+            ffmpeg = install_ffmpeg_zip(zip_path, ffmpeg_dir)
+            remember_ffmpeg_path(mcp_dir, config_path, ffmpeg)
+            print(f"[OK] FFmpeg 已安装：{ffmpeg}")
+            return 0
+        except Exception as exc:
+            print(f"[提示] 下载或安装失败：{exc}")
+        finally:
+            try:
+                if zip_path.exists():
+                    zip_path.unlink()
+            except OSError:
+                pass
+
+    print("[ERROR] FFmpeg 自动安装失败。")
+    print("手动兜底：")
+    print("  1. 下载 ffmpeg-release-essentials.zip 或 ffmpeg-master-latest-win64-gpl.zip")
+    print(f"  2. 放到：{mcp_dir / 'installers'}")
+    print("  3. 重新运行【第一步】安装依赖.bat")
+    print("也可以把已有 ffmpeg.exe 路径写入：")
+    print(f"  {ffmpeg_path_file(mcp_dir)}")
+    return 1
 
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -302,50 +507,13 @@ def configure_ffmpeg(mcp_dir: Path, config_path: Path) -> None:
         print("[跳过] 当前设置了 REAPERAI_CW_SKIP_FFMPEG=1。")
         return
 
-    ffmpeg_dir = mcp_dir / "tools" / "ffmpeg"
-    bundled = ffmpeg_dir / "bin" / "ffmpeg.exe"
-    if bundled.exists():
-        set_ffmpeg_path_data(config_path, str(bundled))
-        print(f"[OK] 已找到内置 FFmpeg：{bundled}")
+    ffmpeg = find_ffmpeg(mcp_dir, config_path)
+    if ffmpeg:
+        print(f"[OK] FFmpeg 已就绪：{ffmpeg}")
         return
 
-    system_ffmpeg = shutil.which("ffmpeg")
-    if system_ffmpeg:
-        set_ffmpeg_path_data(config_path, system_ffmpeg)
-        print(f"[OK] 已找到系统 FFmpeg：{system_ffmpeg}")
-        return
-
-    print("[提示] 未找到 FFmpeg，正在尝试自动下载。")
-    print("       FFmpeg 用于音频格式转换，例如 MP3 转 WAV。")
-    zip_path = Path(tempfile.gettempdir()) / "reaperai_ffmpeg_essentials.zip"
-    if zip_path.exists():
-        zip_path.unlink()
-
-    for index, url in enumerate(FFMPEG_URLS, start=1):
-        try:
-            print(f"[下载] 来源 {index}: {url}")
-            download_to(url, zip_path)
-            break
-        except Exception as exc:
-            print(f"[提示] 下载失败：{exc}")
-
-    if not zip_path.exists():
-        print("[提示] FFmpeg 自动下载失败。以后也可以手动安装，不影响基础配置。")
-        print(f"       手动解压到：{ffmpeg_dir}")
-        return
-
-    try:
-        ffmpeg_exe = install_ffmpeg_zip(zip_path, ffmpeg_dir)
-        set_ffmpeg_path_data(config_path, str(ffmpeg_exe))
-        print(f"[OK] FFmpeg 已安装：{ffmpeg_exe}")
-    except Exception as exc:
-        print(f"[提示] FFmpeg 解压失败：{exc}")
-        print("       以后也可以手动安装，不影响基础配置。")
-    finally:
-        try:
-            zip_path.unlink()
-        except OSError:
-            pass
+    print("[提示] 未找到 FFmpeg。音频生成后的转换/导入需要 FFmpeg。")
+    print("       请重新运行【第一步】安装依赖.bat，或手动把 ffmpeg zip 放到 installers 后再运行第一步。")
 
 
 def run_wizard(argv: list[str]) -> int:
@@ -438,6 +606,8 @@ def main() -> int:
             return install_ffmpeg(argv)
         if command == "set_ffmpeg_path":
             return set_ffmpeg_path(argv)
+        if command == "ensure_ffmpeg":
+            return ensure_ffmpeg(argv)
         return _die(f"Unknown command: {command}")
     except Exception as exc:
         _log_exception(exc)

@@ -1840,43 +1840,95 @@ def make_elevenlabs_sound_request(api_key, text, output_dir=None):
         return {"success": False, "error": f"未知错误: {str(e)}"}
 
 
+def _validate_ffmpeg_path(path):
+    if not path:
+        return None
+    path = str(path).strip().strip('"').strip("'")
+    if not path:
+        return None
+    if os.name == "nt":
+        path = path.replace("/", "\\")
+    if os.path.isdir(path):
+        path = os.path.join(path, "ffmpeg.exe")
+    if not os.path.exists(path):
+        return None
+
+    run_kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "timeout": 8,
+    }
+    if os.name == "nt":
+        run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run([path, "-version"], **run_kwargs)
+    except Exception:
+        return None
+    return os.path.abspath(path) if result.returncode == 0 else None
+
+
+def _remember_ffmpeg_path(server_dir, config_path, ffmpeg_path):
+    try:
+        with open(os.path.join(server_dir, "ffmpeg_path.txt"), "w", encoding="utf-8") as handle:
+            handle.write(os.path.abspath(ffmpeg_path) + "\n")
+    except Exception:
+        pass
+    if config_path and os.path.exists(config_path):
+        try:
+            config = json.loads(read_text_file_smart(config_path))
+            if isinstance(config, dict):
+                config["ffmpeg_path"] = os.path.abspath(ffmpeg_path)
+                with open(config_path, "w", encoding="utf-8") as handle:
+                    json.dump(config, handle, ensure_ascii=False, indent=2)
+                    handle.write("\n")
+        except Exception:
+            pass
+
+
 def get_ffmpeg_path():
-    """获取 FFmpeg 可执行文件路径"""
-    # 1. 检查 config.json 中配置的路径
-    config_paths = [
-        os.path.join(os.path.dirname(__file__), "config.json"),
-        os.path.join(os.path.dirname(__file__), "..", "config.json"),
-    ]
-    for config_path in config_paths:
-        if os.path.exists(config_path):
-            try:
-                config = json.loads(read_text_file_smart(config_path))
-                ffmpeg_path = config.get("ffmpeg_path", "")
-                if ffmpeg_path and os.path.exists(ffmpeg_path):
-                    return ffmpeg_path
-            except:
-                pass
-    
-    # 2. 检查项目目录下的 tools/ffmpeg
-    local_ffmpeg = os.path.join(os.path.dirname(__file__), "tools", "ffmpeg", "bin", "ffmpeg.exe")
-    if os.path.exists(local_ffmpeg):
-        return local_ffmpeg
-    
-    # 3. 检查系统 PATH
-    ffmpeg_cmd = shutil.which("ffmpeg")
-    if ffmpeg_cmd:
-        return ffmpeg_cmd
-    
-    # 4. 常见安装位置
-    common_paths = [
-        r"C:\ffmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
-    ]
-    for path in common_paths:
-        if os.path.exists(path):
-            return path
-    
+    """获取 FFmpeg 可执行文件路径，兼容第一步安装、旧路径和系统 PATH。"""
+    server_dir = os.path.dirname(__file__)
+    config_path = os.path.join(server_dir, "config.json")
+    candidates = []
+
+    def add(value):
+        if not value:
+            return
+        text = str(value).strip().strip('"').strip("'")
+        if text and text not in candidates:
+            candidates.append(text)
+
+    path_file = os.path.join(server_dir, "ffmpeg_path.txt")
+    try:
+        if os.path.exists(path_file):
+            add(read_text_file_smart(path_file).strip())
+    except Exception:
+        pass
+
+    if os.path.exists(config_path):
+        try:
+            config = json.loads(read_text_file_smart(config_path))
+            add(config.get("ffmpeg_path", ""))
+        except Exception:
+            pass
+
+    add(os.environ.get("REAPERAI_FFMPEG_PATH"))
+    add(os.environ.get("FFMPEG_PATH"))
+    add(os.path.join(server_dir, "ffmpeg", "bin", "ffmpeg.exe"))
+    add(os.path.join(server_dir, "tools", "ffmpeg", "bin", "ffmpeg.exe"))
+    add(os.path.join(server_dir, "ffmpeg.exe"))
+    add(os.path.join(server_dir, "tools", "ffmpeg.exe"))
+    add(shutil.which("ffmpeg"))
+    add(r"C:\ffmpeg\bin\ffmpeg.exe")
+    add(r"C:\Program Files\ffmpeg\bin\ffmpeg.exe")
+    add(r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe")
+
+    for candidate in candidates:
+        ffmpeg_path = _validate_ffmpeg_path(candidate)
+        if ffmpeg_path:
+            _remember_ffmpeg_path(server_dir, config_path, ffmpeg_path)
+            return ffmpeg_path
+
     return None
 
 

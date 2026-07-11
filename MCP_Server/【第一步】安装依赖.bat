@@ -444,17 +444,26 @@ exit /b %errorlevel%
 :check_ffmpeg
 echo.
 echo [CHECK] FFmpeg
-if exist "%SCRIPT_DIR%tools\ffmpeg\bin\ffmpeg.exe" (
-  echo [OK] FFmpeg found in MCP_Server tools
+if /i "%REAPERAI_SKIP_FFMPEG%"=="1" (
+  echo [SKIP] FFmpeg check skipped by REAPERAI_SKIP_FFMPEG=1.
   exit /b 0
 )
-ffmpeg -version >nul 2>nul
+"%PYTHON_EXE%" "%SCRIPT_DIR%config_wizard_helper.py" ensure_ffmpeg "%SCRIPT_DIR%" "%SCRIPT_DIR%config.json"
 if not errorlevel 1 (
-  echo [OK] FFmpeg found in system PATH
+  echo [OK] FFmpeg is ready.
   exit /b 0
 )
-echo [WARN] FFmpeg not found.
-echo ElevenLabs audio conversion may be limited.
-echo To enable it offline, put ffmpeg.exe under:
-echo %SCRIPT_DIR%tools\ffmpeg\bin\ffmpeg.exe
-exit /b 0
+echo.
+echo [ERROR] FFmpeg is required for ElevenLabs audio conversion/import.
+echo.
+echo If automatic download is blocked by network restrictions:
+echo   1. Download ffmpeg-release-essentials.zip or ffmpeg-master-latest-win64-gpl.zip
+echo   2. Put the zip file under:
+echo      %SCRIPT_DIR%installers
+echo   3. Run this BAT again.
+echo.
+echo If FFmpeg is already installed, write its full path to:
+echo   %SCRIPT_DIR%ffmpeg_path.txt
+echo Example:
+echo   C:\ffmpeg\bin\ffmpeg.exe
+exit /b 1
