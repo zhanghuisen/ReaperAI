@@ -1062,6 +1062,38 @@ def guard_track_target_lua(params, action, index_key='index', allow_name=True, e
 return "ERROR: Missing track target for {action}; refused to default to project first track. Use selected=true, index/track, target/name, or a created-track binding."
 '''
 
+def _looks_like_numeric_selector(value):
+    text = str(value or '').strip()
+    if not text:
+        return False
+    compact = re.sub(r'\s+', '', text)
+    if re.fullmatch(r'-?\d+', compact):
+        return True
+    if re.search(r'[,;|~:\-]', compact) and re.fullmatch(r'[TtRr]?-?\d+([,;|~:\-][TtRr]?-?\d+)*', compact):
+        return True
+    if re.fullmatch(r'[TtRr]\d+', compact):
+        return True
+    return False
+
+def _split_batch_target_and_name(params, object_keys, name_keys):
+    """Separate index/range selectors from name-like target aliases."""
+    params = params or {}
+    target_value = first_nonempty_param(params, ('range', 'ids', 'index', 'id'))
+    raw_object = first_nonempty_param(params, object_keys)
+    name_value = first_nonempty_param(params, name_keys)
+    if not target_value and _looks_like_numeric_selector(raw_object):
+        target_value = raw_object
+    elif not name_value and raw_object and not _selected_token(raw_object) and not _all_token(raw_object):
+        name_value = raw_object
+    return target_value, name_value
+
+def _batch_order_values(params):
+    return (
+        first_nonempty_param(params, ('order_range', 'ordinal_range', 'sequence_range', 'order', 'ordinal', 'sequence', 'order_index', 'ordinal_index', 'sequence_index')),
+        first_nonempty_param(params, ('order_start', 'ordinal_start', 'sequence_start')),
+        first_nonempty_param(params, ('order_end', 'to_order', 'ordinal_end', 'sequence_end')),
+    )
+
 def parse_volume_to_lua_value(volume):
     if 'dB' in str(volume):
         db_val = float(str(volume).replace('dB', '').strip())
@@ -1399,10 +1431,172 @@ end
 return "✗ Track not found: " .. track_label
 '''
 
+def _generate_track_color_lua(params, color_expr, label, clear_custom=False):
+    params = params or {}
+    target_value, name_value = _split_batch_target_and_name(
+        params,
+        ('target', 'track', 'track_name'),
+        ('name', 'match')
+    )
+    start_value = first_nonempty_param(params, ('start', 'from'))
+    end_value = first_nonempty_param(params, ('end', 'to'))
+    order_value, order_start_value, order_end_value = _batch_order_values(params)
+    scope_value = first_nonempty_param(params, ('scope', 'selector', 'target_scope'))
+    selected_tracks = (
+        _boolish(params.get('selected'))
+        or _selected_token(scope_value)
+        or _selected_token(params.get('target'))
+        or _selected_token(params.get('track'))
+    )
+    all_tracks = _targets_all(params)
+    lua = r'''
+local raw_target = "__TARGET__"
+local raw_start = "__START__"
+local raw_end = "__END__"
+local raw_order_target = "__ORDER_TARGET__"
+local raw_order_start = "__ORDER_START__"
+local raw_order_end = "__ORDER_END__"
+local raw_name = "__NAME__"
+local set_all = __SET_ALL__
+local selected_tracks = __SELECTED_TRACKS__
+local color = __COLOR_EXPR__
+local color_label = "__COLOR_LABEL__"
+local color_mode = "__COLOR_MODE__"
+
+local wanted = {}
+local order_wanted = {}
+local function trim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
+local function add_index(n)
+    n = tonumber(n)
+    if n then wanted[math.floor(n)] = true end
+end
+local function add_order(n)
+    n = tonumber(n)
+    if n then order_wanted[math.floor(n)] = true end
+end
+local function add_range(a, b)
+    a = tonumber(a)
+    b = tonumber(b)
+    if not a or not b then return end
+    local lo = math.min(math.floor(a), math.floor(b))
+    local hi = math.max(math.floor(a), math.floor(b))
+    for idx = lo, hi do wanted[idx] = true end
+end
+local function add_order_range(a, b)
+    a = tonumber(a)
+    b = tonumber(b)
+    if not a or not b then return end
+    local lo = math.min(math.floor(a), math.floor(b))
+    local hi = math.max(math.floor(a), math.floor(b))
+    for order_idx = lo, hi do order_wanted[order_idx] = true end
+end
+local function normalize_token(s)
+    s = trim(s):gsub("^[Tt]rack%s*", ""):gsub("^track%s*", ""):gsub("[Tt]", "")
+    return trim(s)
+end
+local function parse_text(s, add_single, add_range_fn)
+    s = normalize_token(s)
+    local a, b = s:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+    if a and b then add_range_fn(a, b); return end
+    a, b = s:match("(%-?%d+)%s*[%-%~:]%s*(%-?%d+)")
+    if a and b then add_range_fn(a, b) end
+    for part in s:gmatch("[^,%s;|]+") do
+        local token = normalize_token(part)
+        local x, y = token:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+        if x and y then add_range_fn(x, y) else add_single(token) end
+    end
+end
+
+if trim(raw_start) ~= "" or trim(raw_end) ~= "" then add_range(raw_start, raw_end) end
+parse_text(raw_target, add_index, add_range)
+if trim(raw_order_start) ~= "" or trim(raw_order_end) ~= "" then add_order_range(raw_order_start, raw_order_end) end
+parse_text(raw_order_target, add_order, add_order_range)
+local has_indices = false
+for _ in pairs(wanted) do has_indices = true; break end
+local has_order = false
+for _ in pairs(order_wanted) do has_order = true; break end
+local name_filter = trim(raw_name)
+if not set_all and not selected_tracks and not has_indices and not has_order and name_filter == "" then
+    return { ok=false, message="track/set_color requires a track target: selected=true, index/range/ids, order_start/order_end, name/match, or all=true", changed={tracks=0} }
+end
+
+local exact_name_exists = false
+if name_filter ~= "" then
+    for i = 0, reaper.CountTracks(0) - 1 do
+        local track = reaper.GetTrack(0, i)
+        if track then
+            local _, tname = reaper.GetTrackName(track)
+            if tname == name_filter then exact_name_exists = true; break end
+        end
+    end
+end
+
+local targets = {}
+local needle = name_filter:lower()
+for i = 0, reaper.CountTracks(0) - 1 do
+    local track = reaper.GetTrack(0, i)
+    if track then
+        local _, tname = reaper.GetTrackName(track)
+        local order_index = i + 1
+        local selected = reaper.IsTrackSelected and reaper.IsTrackSelected(track)
+        local by_index = wanted[i] == true
+        local by_order = order_wanted[order_index] == true
+        local by_name = false
+        if name_filter ~= "" then
+            if exact_name_exists then
+                by_name = tname == name_filter
+            else
+                by_name = tostring(tname or ""):lower():find(needle, 1, true) ~= nil
+            end
+        end
+        if set_all or by_index or by_order or by_name or (selected_tracks and selected) then
+            table.insert(targets, { track=track, index=i, name=tname or "" })
+        end
+    end
+end
+
+local changed = 0
+local labels = {}
+for _, target in ipairs(targets) do
+    if color_mode == "clear" then
+        reaper.SetMediaTrackInfo_Value(target.track, "I_CUSTOMCOLOR", 0)
+    else
+        reaper.SetTrackColor(target.track, color)
+    end
+    changed = changed + 1
+    if #labels < 8 then
+        table.insert(labels, (target.name ~= "" and target.name or ("#" .. tostring(target.index))))
+    end
+end
+reaper.TrackList_AdjustWindows(false)
+reaper.UpdateArrange()
+if changed == 0 then
+    return { ok=false, message="No matching track found for track/set_color", changed={tracks=0} }
+end
+local action = color_mode == "clear" and "Cleared custom color on " or ("Set color to " .. color_label .. " on ")
+return { ok=true, message=action .. tostring(changed) .. " track(s): " .. table.concat(labels, ", "), changed={tracks=changed} }
+'''
+    return (
+        lua.replace("__TARGET__", lua_escape_string(target_value))
+        .replace("__START__", lua_escape_string(start_value))
+        .replace("__END__", lua_escape_string(end_value))
+        .replace("__ORDER_TARGET__", lua_escape_string(order_value))
+        .replace("__ORDER_START__", lua_escape_string(order_start_value))
+        .replace("__ORDER_END__", lua_escape_string(order_end_value))
+        .replace("__NAME__", lua_escape_string(name_value))
+        .replace("__SET_ALL__", 'true' if all_tracks else 'false')
+        .replace("__SELECTED_TRACKS__", 'true' if selected_tracks else 'false')
+        .replace("__COLOR_EXPR__", color_expr)
+        .replace("__COLOR_LABEL__", lua_escape_string(label or 'color'))
+        .replace("__COLOR_MODE__", 'clear' if clear_custom else 'set')
+    )
+
 def generate_clear_track_color_lua(params):
-    guard = guard_track_target_lua(params, 'track/clear_color', index_key='track')
+    batch_keys = ('range', 'ids', 'id', 'start', 'from', 'end', 'to', 'order', 'order_index', 'order_range', 'order_start', 'order_end', 'match')
+    guard = guard_track_target_lua(params, 'track/clear_color', index_key='track', extra_keys=batch_keys)
     if guard:
         return guard
+    return _generate_track_color_lua(params, '0', 'default', clear_custom=True)
     selected = params.get('selected', '').lower() in ('true', '1', 'yes')
     all_tracks = _targets_all(params)
     lookup = generate_track_lookup_lua(params, index_key='track')
@@ -1446,7 +1640,8 @@ return "Track not found: " .. track_label
 '''
 
 def generate_set_color_lua(params):
-    guard = guard_track_target_lua(params, 'track/set_color', index_key='track')
+    batch_keys = ('range', 'ids', 'id', 'start', 'from', 'end', 'to', 'order', 'order_index', 'order_range', 'order_start', 'order_end', 'match')
+    guard = guard_track_target_lua(params, 'track/set_color', index_key='track', extra_keys=batch_keys)
     if guard:
         return guard
     selected = params.get('selected', '').lower() in ('true', '1', 'yes')
@@ -1459,6 +1654,7 @@ def generate_set_color_lua(params):
     if clear_color:
         return generate_clear_track_color_lua(params)
     color_expr = f'reaper.ColorToNative({r}, {g}, {b}) + 16777216'
+    return _generate_track_color_lua(params, color_expr, label, clear_custom=False)
     label = lua_escape_string(label)
     if all_tracks:
         return f'''
@@ -1805,9 +2001,9 @@ local function parse_text(s, add_single, add_range_fn)
     a, b = s:match("(%-?%d+)%s*[%-%~:]%s*(%-?%d+)")
     if a and b then add_range_fn(a, b) end
     for part in s:gmatch("[^,%s;|]+") do
-        part = normalize_token(part)
-        local x, y = part:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
-        if x and y then add_range_fn(x, y) else add_single(part) end
+        local token = normalize_token(part)
+        local x, y = token:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+        if x and y then add_range_fn(x, y) else add_single(token) end
     end
 end
 if trim(raw_start) ~= "" or trim(raw_end) ~= "" then add_range(raw_start, raw_end) end
@@ -1969,9 +2165,9 @@ local function parse_text(s, add_single, add_range_fn)
     a, b = s:match("(%-?%d+)%s*[%-%~:]%s*(%-?%d+)")
     if a and b then add_range_fn(a, b) end
     for part in s:gmatch("[^,%s;|]+") do
-        part = normalize_token(part)
-        local x, y = part:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
-        if x and y then add_range_fn(x, y) else add_single(part) end
+        local token = normalize_token(part)
+        local x, y = token:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+        if x and y then add_range_fn(x, y) else add_single(token) end
     end
 end
 local function close_enough(a, b)
@@ -2200,6 +2396,180 @@ return { ok=true, message="Set " .. tostring(changed) .. " item(s) color to " ..
         .replace("__TIME_SELECTION_ITEMS__", 'true' if time_selection_items else 'false')
         .replace("__COLOR_EXPR__", color_expr)
         .replace("__COLOR_LABEL__", label)
+    )
+
+def generate_set_item_color_lua(params):
+    """Set MediaItem color only. Supports batch index/range/order selectors."""
+    params = params or {}
+    scope_value = first_nonempty_param(params, ('scope', 'selector', 'target_scope'))
+    target_value, name_value = _split_batch_target_and_name(
+        params,
+        ('item', 'target'),
+        ('name', 'match', 'item_name')
+    )
+    start_value = first_nonempty_param(params, ('start', 'from'))
+    end_value = first_nonempty_param(params, ('end', 'to'))
+    order_value, order_start_value, order_end_value = _batch_order_values(params)
+    scope_norm = str(scope_value or '').strip().lower()
+    current_item = _boolish(params.get('current')) or scope_norm in ('current', 'cursor', 'edit_cursor', '光标', '当前')
+    time_selection_items = _boolish(params.get('time_selection')) or scope_norm in ('time_selection', 'time-selection', 'timerange', 'time_range', 'loop_selection', '时间选区')
+    selected_items = _boolish(params.get('selected')) or ((_selected_token(scope_value) or _selected_token(params.get('target')) or _selected_token(params.get('item'))) and not current_item and not time_selection_items)
+    all_items = _targets_all(params) or _all_token(params.get('items', ''))
+    color_raw = params.get('color', params.get('value', params.get('rgb', '')))
+    color_key = str(color_raw or '').strip().lower()
+    clear_color = color_key in ('default', 'clear', 'none', 'reset', 'native', '0',
+                                '默认', '默认色', '清除', '清空', '恢复默认')
+    r, g, b, label = parse_color_value(color_raw)
+    color_expr = '0' if clear_color else f'reaper.ColorToNative({r}, {g}, {b}) + 16777216'
+    if clear_color:
+        label = 'default'
+    lua = r'''
+local raw_target = "__TARGET__"
+local raw_start = "__START__"
+local raw_end = "__END__"
+local raw_order_target = "__ORDER_TARGET__"
+local raw_order_start = "__ORDER_START__"
+local raw_order_end = "__ORDER_END__"
+local raw_name = "__NAME__"
+local raw_scope = "__SCOPE__"
+local set_all = __SET_ALL__
+local selected_items = __SELECTED_ITEMS__
+local current_item = __CURRENT_ITEM__
+local time_selection_items = __TIME_SELECTION_ITEMS__
+local color = __COLOR_EXPR__
+local color_label = "__COLOR_LABEL__"
+local EPS = 0.001
+
+local wanted = {}
+local order_wanted = {}
+local function trim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
+local function add_index(n)
+    n = tonumber(n)
+    if n then wanted[math.floor(n)] = true end
+end
+local function add_order(n)
+    n = tonumber(n)
+    if n then order_wanted[math.floor(n)] = true end
+end
+local function add_range(a, b)
+    a = tonumber(a)
+    b = tonumber(b)
+    if not a or not b then return end
+    local lo = math.min(math.floor(a), math.floor(b))
+    local hi = math.max(math.floor(a), math.floor(b))
+    for idx = lo, hi do wanted[idx] = true end
+end
+local function add_order_range(a, b)
+    a = tonumber(a)
+    b = tonumber(b)
+    if not a or not b then return end
+    local lo = math.min(math.floor(a), math.floor(b))
+    local hi = math.max(math.floor(a), math.floor(b))
+    for order_idx = lo, hi do order_wanted[order_idx] = true end
+end
+local function normalize_token(s)
+    s = trim(s):gsub("^[Ii]tem%s*", ""):gsub("^item%s*", ""):gsub("[Ii]", "")
+    return trim(s)
+end
+local function parse_text(s, add_single, add_range_fn)
+    s = normalize_token(s)
+    local a, b = s:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+    if a and b then add_range_fn(a, b); return end
+    a, b = s:match("(%-?%d+)%s*[%-%~:]%s*(%-?%d+)")
+    if a and b then add_range_fn(a, b) end
+    for part in s:gmatch("[^,%s;|]+") do
+        local token = normalize_token(part)
+        local x, y = token:match("^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$")
+        if x and y then add_range_fn(x, y) else add_single(token) end
+    end
+end
+local function ranges_overlap(a_start, a_end, b_start, b_end)
+    a_start = tonumber(a_start) or 0
+    a_end = tonumber(a_end) or 0
+    b_start = tonumber(b_start) or 0
+    b_end = tonumber(b_end) or 0
+    return a_end > b_start + EPS and a_start < b_end - EPS
+end
+local function item_name(item)
+    local take = item and reaper.GetActiveTake(item)
+    if take and reaper.GetTakeName then return reaper.GetTakeName(take) or "" end
+    return ""
+end
+
+if trim(raw_start) ~= "" or trim(raw_end) ~= "" then add_range(raw_start, raw_end) end
+parse_text(raw_target, add_index, add_range)
+if trim(raw_order_start) ~= "" or trim(raw_order_end) ~= "" then add_order_range(raw_order_start, raw_order_end) end
+parse_text(raw_order_target, add_order, add_order_range)
+local has_indices = false
+for _ in pairs(wanted) do has_indices = true; break end
+local has_order = false
+for _ in pairs(order_wanted) do has_order = true; break end
+local name_filter = trim(raw_name)
+local contextual = selected_items or current_item or time_selection_items
+if not set_all and not contextual and not has_indices and not has_order and name_filter == "" then
+    return { ok=false, message="item/set_color requires color and an item target: selected=true, scope=current/time_selection, index/range/ids, order_start/order_end, name, match, or all=true", changed={items=0} }
+end
+
+local ts_active, ts_start, ts_end = false, 0, 0
+if reaper.GetSet_LoopTimeRange then
+    ts_start, ts_end = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+    ts_start = tonumber(ts_start) or 0
+    ts_end = tonumber(ts_end) or 0
+    ts_active = ts_end > ts_start + EPS
+end
+local cursor = reaper.GetCursorPosition and (tonumber(reaper.GetCursorPosition()) or 0) or 0
+local needle = name_filter:lower()
+local targets = {}
+for i = 0, reaper.CountMediaItems(0) - 1 do
+    local item = reaper.GetMediaItem(0, i)
+    if item then
+        local selected = reaper.IsMediaItemSelected and reaper.IsMediaItemSelected(item)
+        local pos = tonumber(reaper.GetMediaItemInfo_Value(item, "D_POSITION")) or 0
+        local len = tonumber(reaper.GetMediaItemInfo_Value(item, "D_LENGTH")) or 0
+        local item_end = pos + len
+        local order_index = i + 1
+        local in_time = ts_active and ranges_overlap(pos, item_end, ts_start, ts_end)
+        local at_cursor = cursor >= pos - EPS and cursor <= item_end + EPS
+        local by_name = name_filter ~= "" and item_name(item):lower():find(needle, 1, true) ~= nil
+        if set_all or
+           wanted[i] == true or
+           order_wanted[order_index] == true or
+           (selected_items and selected) or
+           (time_selection_items and in_time) or
+           (current_item and at_cursor) or
+           by_name then
+            table.insert(targets, item)
+        end
+    end
+end
+
+local changed = 0
+for _, item in ipairs(targets) do
+    reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", color)
+    if reaper.UpdateItemInProject then reaper.UpdateItemInProject(item) end
+    changed = changed + 1
+end
+reaper.UpdateArrange()
+if changed == 0 then
+    return { ok=false, message="No matching item found for item/set_color", changed={items=0} }
+end
+return { ok=true, message="Set " .. tostring(changed) .. " item(s) color to " .. color_label, changed={items=changed} }
+'''
+    return (
+        lua.replace("__TARGET__", lua_escape_string(target_value))
+        .replace("__START__", lua_escape_string(start_value))
+        .replace("__END__", lua_escape_string(end_value))
+        .replace("__ORDER_TARGET__", lua_escape_string(order_value))
+        .replace("__ORDER_START__", lua_escape_string(order_start_value))
+        .replace("__ORDER_END__", lua_escape_string(order_end_value))
+        .replace("__NAME__", lua_escape_string(name_value))
+        .replace("__SCOPE__", lua_escape_string(scope_value))
+        .replace("__SET_ALL__", 'true' if all_items else 'false')
+        .replace("__SELECTED_ITEMS__", 'true' if selected_items else 'false')
+        .replace("__CURRENT_ITEM__", 'true' if current_item else 'false')
+        .replace("__TIME_SELECTION_ITEMS__", 'true' if time_selection_items else 'false')
+        .replace("__COLOR_EXPR__", color_expr)
+        .replace("__COLOR_LABEL__", lua_escape_string(label or color_raw or 'color'))
     )
 
 def _bool_param(value):
@@ -5293,6 +5663,61 @@ MCP_ENDPOINTS = {
         "example": "[MCP_CALL:export/master?format=wav]"
     }
 }
+
+MCP_ENDPOINTS.update({
+    "track/set_color": {
+        "description": "Set track color. Supports single and batch targets: index/range/ids/order_start/order_end/name/selected/all; color supports Chinese/English names, #RRGGBB, r,g,b, or default/clear.",
+        "params": {
+            "index": "0-based track index",
+            "range": "0-based track index range such as 2-6",
+            "ids": "Comma/space separated 0-based track indexes",
+            "start": "0-based range start",
+            "end": "0-based range end",
+            "order_start": "1-based track order start",
+            "order_end": "1-based track order end",
+            "name": "track name or keyword",
+            "match": "alias of name",
+            "selected": "true targets selected tracks",
+            "all": "true targets all tracks",
+            "color": "color, for example red/#FF0000/255,0,0/default/clear"
+        },
+        "example": "[MCP_CALL:track/set_color?range=2-6&color=yellow]"
+    },
+    "track/clear_color": {
+        "description": "Clear track custom color and restore theme/default track color. Supports index/range/ids/order_start/order_end/name/selected/all.",
+        "params": {
+            "index": "0-based track index",
+            "range": "0-based track index range such as 2-6",
+            "ids": "Comma/space separated 0-based track indexes",
+            "order_start": "1-based track order start",
+            "order_end": "1-based track order end",
+            "name": "track name or keyword",
+            "selected": "true targets selected tracks",
+            "all": "true targets all tracks"
+        },
+        "example": "[MCP_CALL:track/clear_color?ids=0,2,4]"
+    },
+    "item/set_color": {
+        "description": "Set MediaItem color only. Supports selected=true, all=true, index/range/ids/order_start/order_end, name/match, current, or time_selection=true; color supports Chinese/English color names, #RRGGBB, r,g,b, or default/clear.",
+        "params": {
+            "index": "0-based item index",
+            "range": "0-based item index range such as 2-6",
+            "ids": "Comma/space separated 0-based item indexes",
+            "start": "0-based range start",
+            "end": "0-based range end",
+            "order_start": "1-based item order start",
+            "order_end": "1-based item order end",
+            "name": "active take name or keyword",
+            "match": "alias of name",
+            "selected": "true targets selected items",
+            "all": "true targets all items",
+            "time_selection": "true targets items overlapping the time selection",
+            "scope": "selected/current/time_selection",
+            "color": "color name, #RRGGBB, r,g,b, or default/clear"
+        },
+        "example": "[MCP_CALL:item/set_color?order_start=1&order_end=3&color=yellow]"
+    }
+})
 
 # ============================================================
 # Main

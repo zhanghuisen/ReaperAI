@@ -801,8 +801,8 @@ local function operation_split_options(value)
   local result = {}
   value = value:gsub("\239\188\140", ","):gsub("|", ","):gsub(";", ",")
   for part in value:gmatch("[^,]+") do
-    part = part:gsub("^%s+", ""):gsub("%s+$", "")
-    if part ~= "" then table.insert(result, part) end
+    local token = part:gsub("^%s+", ""):gsub("%s+$", "")
+    if token ~= "" then table.insert(result, token) end
   end
   return result
 end
@@ -892,8 +892,8 @@ local function operation_split_notes(value)
   local result = {}
   value = value:gsub("\239\188\155", "|")
   for part in value:gmatch("[^|]+") do
-    part = part:gsub("^%s+", ""):gsub("%s+$", "")
-    if part ~= "" then table.insert(result, part) end
+    local token = part:gsub("^%s+", ""):gsub("%s+$", "")
+    if token ~= "" then table.insert(result, token) end
   end
   return result
 end
@@ -1985,8 +1985,8 @@ local function operation_track_name_list(raw)
   raw = tostring(raw or ""):gsub("\239\188\140", ","):gsub("|", ","):gsub(";", ",")
   local names = {}
   for part in raw:gmatch("[^,]+") do
-    part = operation_trim(part)
-    if part ~= "" then table.insert(names, part) end
+    local token = operation_trim(part)
+    if token ~= "" then table.insert(names, token) end
   end
   return names
 end
@@ -2184,7 +2184,13 @@ local function operation_has_item_contract_target(params, allow_all)
   params = params or {}
   if operation_truthy(params.selected) then return true end
   if allow_all and operation_truthy(params.all or params.all_items) then return true end
-  return operation_has_value(params, {"index", "item", "target", "name", "match", "item_name"})
+  return operation_has_value(params, {
+    "index", "item", "target", "name", "match", "item_name",
+    "range", "ids", "start", "from", "end", "to",
+    "order", "order_index", "order_start", "order_end", "order_range",
+    "ordinal", "ordinal_index", "ordinal_start", "ordinal_end", "ordinal_range",
+    "sequence", "sequence_index", "sequence_start", "sequence_end", "sequence_range"
+  })
 end
 
 local function operation_has_envelope_contract_target(params)
@@ -2359,8 +2365,8 @@ local function operation_validate_mcp_params(endpoint, params)
     local names_count = 0
     names = names:gsub("\239\188\140", ","):gsub("|", ","):gsub(";", ",")
     for part in names:gmatch("[^,]+") do
-      part = part:gsub("^%s+", ""):gsub("%s+$", "")
-      if part ~= "" then names_count = names_count + 1 end
+      local token = part:gsub("^%s+", ""):gsub("%s+$", "")
+      if token ~= "" then names_count = names_count + 1 end
     end
     if names_count > 0 and count > 1 and names_count ~= count then
       table.insert(issues, "track/create names count does not match count; omit count or make it equal to names")
@@ -2395,18 +2401,18 @@ local function operation_validate_mcp_params(endpoint, params)
       table.insert(issues, "track/set_color 缺少 color 参数")
     end
     if not operation_has_track_contract_target(endpoint, p) then
-      table.insert(issues, "track/set_color 缺少轨道目标，需要 selected/index/name/track/target")
+      table.insert(issues, "track/set_color 缺少轨道目标，需要 selected/all/index/range/ids/order_start/order_end/name/track/target")
     end
   elseif endpoint == "track/clear_color" then
     if not operation_has_track_contract_target(endpoint, p) then
-      table.insert(issues, "track/clear_color requires selected/index/name/track/target/all")
+      table.insert(issues, "track/clear_color requires selected/all/index/range/ids/order_start/order_end/name/track/target")
     end
   elseif endpoint == "item/set_color" then
     if not operation_has_value(p, {"color", "value", "rgb"}) then
       table.insert(issues, "item/set_color 缺少 color 参数")
     end
     if not operation_has_item_contract_target(p, true) and not operation_has_value(p, {"time_selection", "scope"}) then
-      table.insert(issues, "item/set_color 缺少素材目标，需要 selected/all/index/name/item/target/time_selection")
+      table.insert(issues, "item/set_color 缺少素材目标，需要 selected/all/index/range/ids/order_start/order_end/name/item/target/time_selection")
     end
   elseif endpoint == "track/mute" then
     if not operation_has_track_contract_target(endpoint, p) then
@@ -2549,6 +2555,18 @@ local function operation_has_explicit_track_target(endpoint, params)
   params = params or {}
   if operation_bool_param(params.selected) then return true, "selected" end
   if operation_bool_param(params.all) then return true, "all" end
+  if endpoint == "track/set_color" or endpoint == "track/clear_color" then
+    for _, key in ipairs({
+      "range", "ids", "start", "from", "end", "to",
+      "order", "order_index", "order_start", "order_end", "order_range",
+      "ordinal", "ordinal_index", "ordinal_start", "ordinal_end", "ordinal_range",
+      "sequence", "sequence_index", "sequence_start", "sequence_end", "sequence_range",
+      "match"
+    }) do
+      local value = operation_param_string(params, key)
+      if value ~= "" then return true, key, value end
+    end
+  end
 
   local keys
   if endpoint == "track/rename" then

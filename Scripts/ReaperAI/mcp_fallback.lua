@@ -59,6 +59,36 @@ local function first_nonempty_param(params, keys)
   return ""
 end
 
+local function looks_like_numeric_selector(value)
+  local text = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if text == "" then return false end
+  text = text:gsub("%s+", "")
+  if text:match("^%-?%d+$") then return true end
+  if text:match("^[TtRr]?%-?%d+([,;|~:%-][TtRr]?%-?%d+)+$") then return true end
+  if text:match("^[TtRr]%d+$") then return true end
+  return false
+end
+
+local function split_batch_target_and_name(params, object_keys, name_keys)
+  params = params or {}
+  local target = first_nonempty_param(params, {"range", "ids", "index", "id"})
+  local raw_object = first_nonempty_param(params, object_keys)
+  local name = first_nonempty_param(params, name_keys)
+  if target == "" and looks_like_numeric_selector(raw_object) then
+    target = raw_object
+  elseif name == "" and raw_object ~= "" and not selected_token(raw_object) and not all_token(raw_object) then
+    name = raw_object
+  end
+  return target, name
+end
+
+local function batch_order_values(params)
+  return
+    first_nonempty_param(params, {"order_range", "ordinal_range", "sequence_range", "order", "ordinal", "sequence", "order_index", "ordinal_index", "sequence_index"}),
+    first_nonempty_param(params, {"order_start", "ordinal_start", "sequence_start"}),
+    first_nonempty_param(params, {"order_end", "to_order", "ordinal_end", "sequence_end"})
+end
+
 local function region_delete_fallback_code(params)
   params = params or {}
   local target = first_nonempty_param(params, {"range", "ids", "index", "id", "region", "target"})
@@ -97,9 +127,9 @@ local function region_delete_fallback_code(params)
     "  a, b = s:match('(%-?%d+)%s*[%-%~:]%s*(%-?%d+)')\n" ..
     "  if a and b then add_range_fn(a, b) end\n" ..
     "  for part in s:gmatch('[^,%s;|]+') do\n" ..
-    "    part = normalize_token(part)\n" ..
-    "    local x, y = part:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$')\n" ..
-    "    if x and y then add_range_fn(x, y) else add_single(part) end\n" ..
+    "    local token = normalize_token(part)\n" ..
+    "    local x, y = token:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$')\n" ..
+    "    if x and y then add_range_fn(x, y) else add_single(token) end\n" ..
     "  end\n" ..
     "end\n" ..
     "if trim(raw_start) ~= '' or trim(raw_end) ~= '' then add_range(raw_start, raw_end) end\n" ..
@@ -216,48 +246,51 @@ local function track_target_index_name(params, allow_name)
   return index, name
 end
 
+local function track_color_code(params, color_expr, label, clear_custom)
+  params = params or {}
+  local target, name = split_batch_target_and_name(params, {"target", "track", "track_name"}, {"name", "match"})
+  local start_id = first_nonempty_param(params, {"start", "from"})
+  local end_id = first_nonempty_param(params, {"end", "to"})
+  local order_target, order_start, order_end = batch_order_values(params)
+  local scope = tostring(params.scope or params.selector or params.target_scope or "")
+  local selected_tracks = boolish(params.selected) or selected_token(scope) or selected_token(params.target) or selected_token(params.track)
+  local set_all = targets_all(params)
+  local mode = clear_custom and "clear" or "set"
+  return
+    "local raw_target = " .. lua_quote(target) .. "\n" ..
+    "local raw_start = " .. lua_quote(start_id) .. "\n" ..
+    "local raw_end = " .. lua_quote(end_id) .. "\n" ..
+    "local raw_order_target = " .. lua_quote(order_target) .. "\n" ..
+    "local raw_order_start = " .. lua_quote(order_start) .. "\n" ..
+    "local raw_order_end = " .. lua_quote(order_end) .. "\n" ..
+    "local raw_name = " .. lua_quote(name) .. "\n" ..
+    "local set_all = " .. tostring(set_all) .. "\n" ..
+    "local selected_tracks = " .. tostring(selected_tracks) .. "\n" ..
+    "local color = " .. color_expr .. "\n" ..
+    "local color_label = " .. lua_quote(label) .. "\n" ..
+    "local color_mode = " .. lua_quote(mode) .. "\n" ..
+    "local wanted, order_wanted = {}, {}\n" ..
+    "local function trim(s) return tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', '') end\n" ..
+    "local function add_index(n) n=tonumber(n); if n then wanted[math.floor(n)] = true end end\n" ..
+    "local function add_order(n) n=tonumber(n); if n then order_wanted[math.floor(n)] = true end end\n" ..
+    "local function add_range(a,b) a=tonumber(a); b=tonumber(b); if not a or not b then return end; local lo=math.min(math.floor(a), math.floor(b)); local hi=math.max(math.floor(a), math.floor(b)); for idx=lo,hi do wanted[idx]=true end end\n" ..
+    "local function add_order_range(a,b) a=tonumber(a); b=tonumber(b); if not a or not b then return end; local lo=math.min(math.floor(a), math.floor(b)); local hi=math.max(math.floor(a), math.floor(b)); for idx=lo,hi do order_wanted[idx]=true end end\n" ..
+    "local function normalize_token(s) s=trim(s):gsub('^[Tt]rack%s*',''):gsub('^track%s*',''):gsub('[Tt]',''); return trim(s) end\n" ..
+    "local function parse_text(s, add_single, add_range_fn) s=normalize_token(s); local a,b=s:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if a and b then add_range_fn(a,b); return end; a,b=s:match('(%-?%d+)%s*[%-%~:]%s*(%-?%d+)'); if a and b then add_range_fn(a,b) end; for part in s:gmatch('[^,%s;|]+') do local token=normalize_token(part); local x,y=token:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if x and y then add_range_fn(x,y) else add_single(token) end end end\n" ..
+    "if trim(raw_start) ~= '' or trim(raw_end) ~= '' then add_range(raw_start, raw_end) end; parse_text(raw_target, add_index, add_range)\n" ..
+    "if trim(raw_order_start) ~= '' or trim(raw_order_end) ~= '' then add_order_range(raw_order_start, raw_order_end) end; parse_text(raw_order_target, add_order, add_order_range)\n" ..
+    "local has_indices=false; for _ in pairs(wanted) do has_indices=true; break end; local has_order=false; for _ in pairs(order_wanted) do has_order=true; break end\n" ..
+    "local name_filter=trim(raw_name); if not set_all and not selected_tracks and not has_indices and not has_order and name_filter == '' then return { ok=false, message='track/set_color requires a track target', changed={tracks=0} } end\n" ..
+    "local exact_name_exists=false; if name_filter ~= '' then for i=0,reaper.CountTracks(0)-1 do local tr=reaper.GetTrack(0,i); if tr then local _,tn=reaper.GetTrackName(tr); if tn == name_filter then exact_name_exists=true; break end end end end\n" ..
+    "local targets={}; local needle=name_filter:lower(); for i=0,reaper.CountTracks(0)-1 do local tr=reaper.GetTrack(0,i); if tr then local _,tn=reaper.GetTrackName(tr); local order_index=i+1; local selected=reaper.IsTrackSelected and reaper.IsTrackSelected(tr); local by_index=wanted[i] == true; local by_order=order_wanted[order_index] == true; local by_name=false; if name_filter ~= '' then if exact_name_exists then by_name=tn == name_filter else by_name=tostring(tn or ''):lower():find(needle,1,true) ~= nil end end; if set_all or by_index or by_order or by_name or (selected_tracks and selected) then table.insert(targets,{track=tr,index=i,name=tn or ''}) end end end\n" ..
+    "local changed=0; local labels={}; for _,target in ipairs(targets) do if color_mode == 'clear' then reaper.SetMediaTrackInfo_Value(target.track,'I_CUSTOMCOLOR',0) else reaper.SetTrackColor(target.track,color) end; changed=changed+1; if #labels < 8 then table.insert(labels, target.name ~= '' and target.name or ('#' .. tostring(target.index))) end end\n" ..
+    "reaper.TrackList_AdjustWindows(false); reaper.UpdateArrange(); if changed == 0 then return { ok=false, message='No matching track found for track/set_color', changed={tracks=0} } end\n" ..
+    "local action=color_mode == 'clear' and 'Cleared custom color on ' or ('Set color to ' .. color_label .. ' on '); return { ok=true, message=action .. tostring(changed) .. ' track(s): ' .. table.concat(labels, ', '), changed={tracks=changed} }\n"
+end
+
 local function track_clear_color_code(params)
   params = params or {}
-  local lua_code = ""
-  if targets_all(params) then
-    lua_code = "local count = 0\n"
-    lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
-    lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
-    lua_code = lua_code .. "  if t then\n"
-    lua_code = lua_code .. "    reaper.SetMediaTrackInfo_Value(t, 'I_CUSTOMCOLOR', 0)\n"
-    lua_code = lua_code .. "    count = count + 1\n"
-    lua_code = lua_code .. "  end\n"
-    lua_code = lua_code .. "end\n"
-    lua_code = lua_code .. "reaper.TrackList_AdjustWindows(false)\n"
-    lua_code = lua_code .. "reaper.UpdateArrange()\n"
-    lua_code = lua_code .. "return 'Cleared custom color on ' .. count .. ' track(s)'"
-    return lua_code
-  elseif boolish(params.selected) then
-    lua_code = "local count = 0\n"
-    lua_code = lua_code .. "for i = 0, reaper.CountTracks(0) - 1 do\n"
-    lua_code = lua_code .. "  local t = reaper.GetTrack(0, i)\n"
-    lua_code = lua_code .. "  if t and reaper.IsTrackSelected(t) then\n"
-    lua_code = lua_code .. "    reaper.SetMediaTrackInfo_Value(t, 'I_CUSTOMCOLOR', 0)\n"
-    lua_code = lua_code .. "    count = count + 1\n"
-    lua_code = lua_code .. "  end\n"
-    lua_code = lua_code .. "end\n"
-    lua_code = lua_code .. "reaper.TrackList_AdjustWindows(false)\n"
-    lua_code = lua_code .. "reaper.UpdateArrange()\n"
-    lua_code = lua_code .. "return 'Cleared custom color on ' .. count .. ' selected track(s)'"
-    return lua_code
-  end
-
-  local track_index, track_name = track_target_index_name(params, true)
-  lua_code = track_lookup_code(track_index, track_name)
-  lua_code = lua_code .. "if t then\n"
-  lua_code = lua_code .. "  reaper.SetMediaTrackInfo_Value(t, 'I_CUSTOMCOLOR', 0)\n"
-  lua_code = lua_code .. "  reaper.TrackList_AdjustWindows(false)\n"
-  lua_code = lua_code .. "  reaper.UpdateArrange()\n"
-  lua_code = lua_code .. "  return 'Cleared custom color on track ' .. track_label\n"
-  lua_code = lua_code .. "else\n"
-  lua_code = lua_code .. "  return 'Track not found: ' .. track_label\n"
-  lua_code = lua_code .. "end"
-  return lua_code
+  return track_color_code(params, "0", "default", true)
 end
 
 local function env_value(raw, lane, default)
@@ -387,7 +420,7 @@ local function region_set_color_fallback_code(params)
     "local function add_range(a,b) a=tonumber(a); b=tonumber(b); if not a or not b then return end; local lo=math.min(math.floor(a), math.floor(b)); local hi=math.max(math.floor(a), math.floor(b)); for id=lo,hi do wanted[id]=true end end\n" ..
     "local function add_order_range(a,b) a=tonumber(a); b=tonumber(b); if not a or not b then return end; local lo=math.min(math.floor(a), math.floor(b)); local hi=math.max(math.floor(a), math.floor(b)); for idx=lo,hi do order_wanted[idx]=true end end\n" ..
     "local function normalize_token(s) s=trim(s):gsub('^[Rr]egion%s*',''):gsub('^region%s*',''):gsub('[Rr]',''); return trim(s) end\n" ..
-    "local function parse_text(s, add_single, add_range_fn) s=normalize_token(s); local a,b=s:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if a and b then add_range_fn(a,b); return end; a,b=s:match('(%-?%d+)%s*[%-%~:]%s*(%-?%d+)'); if a and b then add_range_fn(a,b) end; for part in s:gmatch('[^,%s;|]+') do part=normalize_token(part); local x,y=part:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if x and y then add_range_fn(x,y) else add_single(part) end end end\n" ..
+    "local function parse_text(s, add_single, add_range_fn) s=normalize_token(s); local a,b=s:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if a and b then add_range_fn(a,b); return end; a,b=s:match('(%-?%d+)%s*[%-%~:]%s*(%-?%d+)'); if a and b then add_range_fn(a,b) end; for part in s:gmatch('[^,%s;|]+') do local token=normalize_token(part); local x,y=token:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if x and y then add_range_fn(x,y) else add_single(token) end end end\n" ..
     "local function close_enough(a,b) return math.abs((tonumber(a) or 0)-(tonumber(b) or 0)) <= EPS end\n" ..
     "local function ranges_overlap(a_start,a_end,b_start,b_end) return (tonumber(a_end) or 0) > (tonumber(b_start) or 0) + EPS and (tonumber(a_start) or 0) < (tonumber(b_end) or 0) - EPS end\n" ..
     "if trim(raw_start) ~= '' or trim(raw_end) ~= '' then add_range(raw_start, raw_end) end; parse_text(raw_target, add_id, add_range)\n" ..
@@ -436,6 +469,56 @@ local function item_set_color_fallback_code(params)
     "local ts_active, ts_start, ts_end=false,0,0; if reaper.GetSet_LoopTimeRange then ts_start,ts_end=reaper.GetSet_LoopTimeRange(false,false,0,0,false); ts_start=tonumber(ts_start) or 0; ts_end=tonumber(ts_end) or 0; ts_active=ts_end > ts_start + EPS end\n" ..
     "local cursor=reaper.GetCursorPosition and (tonumber(reaper.GetCursorPosition()) or 0) or 0; local needle=name_filter:lower(); local targets={}\n" ..
     "for i=0,reaper.CountMediaItems(0)-1 do local item=reaper.GetMediaItem(0,i); if item then local selected=reaper.IsMediaItemSelected and reaper.IsMediaItemSelected(item); local pos=tonumber(reaper.GetMediaItemInfo_Value(item,'D_POSITION')) or 0; local len=tonumber(reaper.GetMediaItemInfo_Value(item,'D_LENGTH')) or 0; local item_end=pos+len; local in_time=ts_active and ranges_overlap(pos,item_end,ts_start,ts_end); local at_cursor=cursor >= pos - EPS and cursor <= item_end + EPS; local by_name=name_filter ~= '' and item_name(item):lower():find(needle,1,true) ~= nil; if set_all or (wanted_index ~= nil and i == wanted_index) or (selected_items and selected) or (time_selection_items and in_time) or (current_item and at_cursor) or by_name then table.insert(targets,item) end end end\n" ..
+    "local changed=0; for _,item in ipairs(targets) do reaper.SetMediaItemInfo_Value(item, 'I_CUSTOMCOLOR', color); if reaper.UpdateItemInProject then reaper.UpdateItemInProject(item) end; changed=changed+1 end\n" ..
+    "reaper.UpdateArrange(); if changed == 0 then return { ok=false, message='No matching item found for item/set_color', changed={items=0} } end\n" ..
+    "return { ok=true, message='Set ' .. tostring(changed) .. ' item(s) color to ' .. color_label, changed={items=changed} }\n"
+end
+
+local function item_set_color_fallback_code(params)
+  params = params or {}
+  local color_expr, label = custom_color_expr(params)
+  local target, name = split_batch_target_and_name(params, {"item", "target"}, {"name", "match", "item_name"})
+  local start_id = first_nonempty_param(params, {"start", "from"})
+  local end_id = first_nonempty_param(params, {"end", "to"})
+  local order_target, order_start, order_end = batch_order_values(params)
+  local scope = tostring(params.scope or params.selector or params.target_scope or ""):lower()
+  local current_item = boolish(params.current) or scope == "current" or scope == "cursor" or scope == "edit_cursor"
+  local time_selection_items = boolish(params.time_selection) or scope == "time_selection" or scope == "time-selection" or scope == "timerange" or scope == "time_range" or scope == "loop_selection"
+  local selected_items = boolish(params.selected) or ((selected_token(scope) or selected_token(params.target) or selected_token(params.item)) and not current_item and not time_selection_items)
+  local set_all = targets_all(params) or all_token(params.items)
+  return
+    "local raw_target = " .. lua_quote(target) .. "\n" ..
+    "local raw_start = " .. lua_quote(start_id) .. "\n" ..
+    "local raw_end = " .. lua_quote(end_id) .. "\n" ..
+    "local raw_order_target = " .. lua_quote(order_target) .. "\n" ..
+    "local raw_order_start = " .. lua_quote(order_start) .. "\n" ..
+    "local raw_order_end = " .. lua_quote(order_end) .. "\n" ..
+    "local raw_name = " .. lua_quote(name) .. "\n" ..
+    "local color = " .. color_expr .. "\n" ..
+    "local color_label = " .. lua_quote(label) .. "\n" ..
+    "local set_all = " .. tostring(set_all) .. "\n" ..
+    "local selected_items = " .. tostring(selected_items) .. "\n" ..
+    "local current_item = " .. tostring(current_item) .. "\n" ..
+    "local time_selection_items = " .. tostring(time_selection_items) .. "\n" ..
+    "local EPS = 0.001\n" ..
+    "local wanted, order_wanted = {}, {}\n" ..
+    "local function trim(s) return tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', '') end\n" ..
+    "local function add_index(n) n=tonumber(n); if n then wanted[math.floor(n)] = true end end\n" ..
+    "local function add_order(n) n=tonumber(n); if n then order_wanted[math.floor(n)] = true end end\n" ..
+    "local function add_range(a,b) a=tonumber(a); b=tonumber(b); if not a or not b then return end; local lo=math.min(math.floor(a), math.floor(b)); local hi=math.max(math.floor(a), math.floor(b)); for idx=lo,hi do wanted[idx]=true end end\n" ..
+    "local function add_order_range(a,b) a=tonumber(a); b=tonumber(b); if not a or not b then return end; local lo=math.min(math.floor(a), math.floor(b)); local hi=math.max(math.floor(a), math.floor(b)); for idx=lo,hi do order_wanted[idx]=true end end\n" ..
+    "local function normalize_token(s) s=trim(s):gsub('^[Ii]tem%s*',''):gsub('^item%s*',''):gsub('[Ii]',''); return trim(s) end\n" ..
+    "local function parse_text(s, add_single, add_range_fn) s=normalize_token(s); local a,b=s:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if a and b then add_range_fn(a,b); return end; a,b=s:match('(%-?%d+)%s*[%-%~:]%s*(%-?%d+)'); if a and b then add_range_fn(a,b) end; for part in s:gmatch('[^,%s;|]+') do local token=normalize_token(part); local x,y=token:match('^(%-?%d+)%s*[%-%~:]%s*(%-?%d+)$'); if x and y then add_range_fn(x,y) else add_single(token) end end end\n" ..
+    "local function ranges_overlap(a_start,a_end,b_start,b_end) return (tonumber(a_end) or 0) > (tonumber(b_start) or 0) + EPS and (tonumber(a_start) or 0) < (tonumber(b_end) or 0) - EPS end\n" ..
+    "local function item_name(item) local take=item and reaper.GetActiveTake(item); if take and reaper.GetTakeName then return reaper.GetTakeName(take) or '' end; return '' end\n" ..
+    "if trim(raw_start) ~= '' or trim(raw_end) ~= '' then add_range(raw_start, raw_end) end; parse_text(raw_target, add_index, add_range)\n" ..
+    "if trim(raw_order_start) ~= '' or trim(raw_order_end) ~= '' then add_order_range(raw_order_start, raw_order_end) end; parse_text(raw_order_target, add_order, add_order_range)\n" ..
+    "local has_indices=false; for _ in pairs(wanted) do has_indices=true; break end; local has_order=false; for _ in pairs(order_wanted) do has_order=true; break end\n" ..
+    "local name_filter=trim(raw_name); local contextual=selected_items or current_item or time_selection_items\n" ..
+    "if not set_all and not contextual and not has_indices and not has_order and name_filter == '' then return { ok=false, message='item/set_color requires an item target', changed={items=0} } end\n" ..
+    "local ts_active, ts_start, ts_end=false,0,0; if reaper.GetSet_LoopTimeRange then ts_start,ts_end=reaper.GetSet_LoopTimeRange(false,false,0,0,false); ts_start=tonumber(ts_start) or 0; ts_end=tonumber(ts_end) or 0; ts_active=ts_end > ts_start + EPS end\n" ..
+    "local cursor=reaper.GetCursorPosition and (tonumber(reaper.GetCursorPosition()) or 0) or 0; local needle=name_filter:lower(); local targets={}\n" ..
+    "for i=0,reaper.CountMediaItems(0)-1 do local item=reaper.GetMediaItem(0,i); if item then local selected=reaper.IsMediaItemSelected and reaper.IsMediaItemSelected(item); local pos=tonumber(reaper.GetMediaItemInfo_Value(item,'D_POSITION')) or 0; local len=tonumber(reaper.GetMediaItemInfo_Value(item,'D_LENGTH')) or 0; local item_end=pos+len; local order_index=i+1; local in_time=ts_active and ranges_overlap(pos,item_end,ts_start,ts_end); local at_cursor=cursor >= pos - EPS and cursor <= item_end + EPS; local by_name=name_filter ~= '' and item_name(item):lower():find(needle,1,true) ~= nil; if set_all or wanted[i] == true or order_wanted[order_index] == true or (selected_items and selected) or (time_selection_items and in_time) or (current_item and at_cursor) or by_name then table.insert(targets,item) end end end\n" ..
     "local changed=0; for _,item in ipairs(targets) do reaper.SetMediaItemInfo_Value(item, 'I_CUSTOMCOLOR', color); if reaper.UpdateItemInProject then reaper.UpdateItemInProject(item) end; changed=changed+1 end\n" ..
     "reaper.UpdateArrange(); if changed == 0 then return { ok=false, message='No matching item found for item/set_color', changed={items=0} } end\n" ..
     "return { ok=true, message='Set ' .. tostring(changed) .. ' item(s) color to ' .. color_label, changed={items=changed} }\n"
@@ -689,8 +772,8 @@ function McpFallback.create()
       if raw_names ~= "" then
         local normalized = tostring(raw_names):gsub("\239\188\140", ","):gsub("|", ","):gsub(";", ",")
         for part in normalized:gmatch("[^,]+") do
-          part = part:gsub("^%s+", ""):gsub("%s+$", "")
-          if part ~= "" then table.insert(explicit_names, part) end
+          local token = part:gsub("^%s+", ""):gsub("%s+$", "")
+          if token ~= "" then table.insert(explicit_names, token) end
         end
       end
       local count = tonumber(params.count) or (#explicit_names > 0 and #explicit_names or 1)
@@ -889,6 +972,9 @@ function McpFallback.create()
       if clear_color then label = "default" end
       local label_q = lua_quote(label)
       local color_expr = clear_color and "0" or ("reaper.ColorToNative(" .. r .. ", " .. g .. ", " .. b .. ") + 16777216")
+      lua_code = track_color_code(params, color_expr, label, false)
+      desc = "track/set_color (local fallback)"
+      if false then
       if targets_all(params) then
         lua_code = "local color = " .. color_expr .. "\n"
         lua_code = lua_code .. "local count = 0\n"
@@ -931,6 +1017,8 @@ function McpFallback.create()
         lua_code = lua_code .. "end"
       end
       desc = "track/set_color (本地fallback)"
+
+      end
 
       end
 

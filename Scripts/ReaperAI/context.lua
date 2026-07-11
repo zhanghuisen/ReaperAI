@@ -277,7 +277,7 @@ function Context.create(opts)
     end
 
     table.insert(lines, "Generic selector hint: contextual selection candidates are resolved by ACTION_PLAN scope/exclude. Use region.delete scope=selected/current/time_selection or scope=all exclude=selected; do not use region/delete?selected=true or keep_selected=true.")
-    table.insert(lines, "Color endpoint hint: track color uses track/set_color; item color uses item/set_color; Region color uses region/set_color. Region and Marker are separate objects; never use Marker operations for Region color.")
+    table.insert(lines, "Color endpoint hint: track color uses track/set_color; item color uses item/set_color; Region color uses region/set_color. All three support batch targets such as range/ids/order_start/order_end/all/selected when applicable. Region and Marker are separate objects; never use Marker operations for Region color.")
 
     if #cursor_region_info > 0 then
       table.insert(lines, "光标所在位置:")
