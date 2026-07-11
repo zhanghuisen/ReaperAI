@@ -18,6 +18,26 @@ FFMPEG_URLS = (
     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
 )
 
+PYPI_INDEXES = (
+    ("", ""),
+    ("https://pypi.tuna.tsinghua.edu.cn/simple", "pypi.tuna.tsinghua.edu.cn"),
+    ("https://mirrors.aliyun.com/pypi/simple", "mirrors.aliyun.com"),
+    ("https://mirrors.cloud.tencent.com/pypi/simple", "mirrors.cloud.tencent.com"),
+    ("https://pypi.mirrors.ustc.edu.cn/simple", "pypi.mirrors.ustc.edu.cn"),
+    ("https://pypi.doubanio.com/simple", "pypi.doubanio.com"),
+)
+
+CORE_PACKAGES = (
+    ("requests", "requests"),
+    ("flask", "flask"),
+    ("flask-cors", "flask_cors"),
+)
+
+OPTIONAL_PACKAGES = (
+    ("numpy", "numpy", "音频分析"),
+    ("soundfile", "soundfile", "额外 WAV 格式支持"),
+)
+
 
 def _configure_stdio() -> None:
     for stream in (sys.stdout, sys.stderr):
@@ -301,7 +321,31 @@ def download_to(url: str, output_path: Path) -> None:
 
     request = urllib.request.Request(url, headers={"User-Agent": "ReaperAI-config-wizard/1.0"})
     with urllib.request.urlopen(request, timeout=180) as response, tmp_path.open("wb") as handle:
-        shutil.copyfileobj(response, handle)
+        total_header = response.headers.get("Content-Length", "")
+        try:
+            total = int(total_header)
+        except (TypeError, ValueError):
+            total = 0
+        downloaded = 0
+        last_percent = -1
+        last_mb = -1
+        print("[提示] 正在下载，网络慢时可能需要几分钟，请不要关闭窗口。")
+        while True:
+            chunk = response.read(1024 * 256)
+            if not chunk:
+                break
+            handle.write(chunk)
+            downloaded += len(chunk)
+            if total > 0:
+                percent = int(downloaded * 100 / total)
+                if percent != last_percent and (percent % 5 == 0 or percent == 100):
+                    print(f"[进度] {percent:3d}%  {downloaded / 1048576:.1f}/{total / 1048576:.1f} MB")
+                    last_percent = percent
+            else:
+                mb = int(downloaded / 1048576)
+                if mb != last_mb and mb > 0:
+                    print(f"[进度] 已下载 {downloaded / 1048576:.1f} MB")
+                    last_mb = mb
     tmp_path.replace(output_path)
 
 
@@ -474,6 +518,309 @@ def ensure_ffmpeg(argv: list[str]) -> int:
     return 1
 
 
+def _subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    return env
+
+
+def _subprocess_flags() -> dict:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
+def run_command(args: list[str], cwd: Path | None = None, quiet: bool = False, timeout: int | None = None) -> int:
+    kwargs = {
+        "cwd": str(cwd) if cwd else None,
+        "env": _subprocess_env(),
+        "timeout": timeout,
+    }
+    kwargs.update(_subprocess_flags())
+    if quiet:
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
+    result = subprocess.run(args, **kwargs)
+    return int(result.returncode)
+
+
+def command_output(args: list[str], timeout: int = 20) -> str:
+    kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.DEVNULL,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "env": _subprocess_env(),
+        "timeout": timeout,
+    }
+    kwargs.update(_subprocess_flags())
+    try:
+        result = subprocess.run(args, **kwargs)
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def python_version_text(python_exe: Path) -> str:
+    output = command_output([str(python_exe), "-c", "import sys; print('.'.join(map(str, sys.version_info[:3])))"])
+    return output or "unknown"
+
+
+def python_version_tuple(python_exe: Path) -> tuple[int, int]:
+    output = command_output([str(python_exe), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"])
+    try:
+        major, minor = output.split(".", 1)
+        return int(major), int(minor)
+    except Exception:
+        return 0, 0
+
+
+def python_site_packages(python_exe: Path) -> Path | None:
+    code = (
+        "import site, sysconfig; "
+        "paths=site.getsitepackages() if hasattr(site,'getsitepackages') else []; "
+        "print((paths+[sysconfig.get_paths().get('purelib','')])[0])"
+    )
+    output = command_output([str(python_exe), "-c", code])
+    return Path(normalize_user_path(output)) if output else None
+
+
+def pythonw_for(python_exe: Path) -> Path:
+    if os.name == "nt" and python_exe.name.lower() == "python.exe":
+        candidate = python_exe.with_name("pythonw.exe")
+        if candidate.exists():
+            return candidate
+    return python_exe
+
+
+def write_python_path_files(mcp_dir: Path, python_exe: Path) -> None:
+    python_exe = python_exe.resolve()
+    (mcp_dir / "python_path.txt").write_text(str(python_exe) + "\n", encoding="utf-8")
+    (mcp_dir / "pythonw_path.txt").write_text(str(pythonw_for(python_exe).resolve()) + "\n", encoding="utf-8")
+
+
+def prepare_install_python(mcp_dir: Path) -> Path:
+    current = Path(sys.executable).resolve()
+    if path_is_under(current, mcp_dir):
+        write_python_path_files(mcp_dir, current)
+        return current
+
+    venv_python = mcp_dir / ".venv" / "Scripts" / "python.exe"
+    if not venv_python.exists():
+        print(f"[安装] 正在创建本地 Python 环境：{mcp_dir / '.venv'}")
+        rc = run_command([str(current), "-m", "venv", str(mcp_dir / ".venv")], cwd=mcp_dir)
+        if rc != 0:
+            raise RuntimeError("无法创建 MCP_Server\\.venv。请确认当前 Python 可用，或删除损坏的 .venv 后重试。")
+    if not venv_python.exists():
+        raise RuntimeError("本地 Python 环境创建失败，没有生成 .venv\\Scripts\\python.exe。")
+    write_python_path_files(mcp_dir, venv_python)
+    return venv_python.resolve()
+
+
+def module_import_ok(python_exe: Path, module_name: str) -> bool:
+    return run_command([str(python_exe), "-c", f"import {module_name}"], quiet=True, timeout=20) == 0
+
+
+def pip_available(python_exe: Path) -> bool:
+    return run_command([str(python_exe), "-m", "pip", "--version"], quiet=True, timeout=30) == 0
+
+
+def ensure_pip(python_exe: Path) -> bool:
+    if pip_available(python_exe):
+        return True
+    print("[提示] 当前 Python 没有 pip，正在尝试启用 pip。")
+    run_command([str(python_exe), "-m", "ensurepip", "--upgrade"], quiet=True, timeout=120)
+    return pip_available(python_exe)
+
+
+def local_wheel_files(mcp_dir: Path) -> list[Path]:
+    wheels_dir = mcp_dir / "wheels"
+    if not wheels_dir.exists():
+        return []
+    return sorted(path for path in wheels_dir.glob("*.whl") if path.is_file())
+
+
+def expand_local_wheels(mcp_dir: Path, python_exe: Path) -> bool:
+    wheels = local_wheel_files(mcp_dir)
+    if not wheels:
+        return False
+    if python_version_tuple(python_exe) != (3, 11):
+        print("[提示] 本地 wheels 是 Python 3.11 版本，当前 Python 版本不同，跳过直接解包。")
+        return False
+    site_packages = python_site_packages(python_exe)
+    if not site_packages:
+        return False
+    print("[安装] 正在使用随包 wheels 离线安装核心依赖。")
+    site_packages.mkdir(parents=True, exist_ok=True)
+    for wheel in wheels:
+        try:
+            with zipfile.ZipFile(wheel) as archive:
+                archive.extractall(site_packages)
+        except Exception as exc:
+            print(f"[提示] wheel 解包失败：{wheel.name} - {exc}")
+            return False
+    return True
+
+
+def pip_install_package(python_exe: Path, mcp_dir: Path, package_name: str) -> bool:
+    wheels_dir = mcp_dir / "wheels"
+    if local_wheel_files(mcp_dir) and pip_available(python_exe):
+        print(f"[尝试] 本地 wheels：{package_name}")
+        rc = run_command(
+            [
+                str(python_exe),
+                "-m",
+                "pip",
+                "install",
+                package_name,
+                "--no-index",
+                "--find-links",
+                str(wheels_dir),
+                "--retries",
+                "1",
+                "--timeout",
+                "30",
+            ],
+            cwd=mcp_dir,
+        )
+        if rc == 0:
+            return True
+
+    if not ensure_pip(python_exe):
+        return False
+
+    for index_url, trusted_host in PYPI_INDEXES:
+        if index_url:
+            print(f"[尝试] 镜像源 {index_url}：{package_name}")
+            args = [
+                str(python_exe),
+                "-m",
+                "pip",
+                "install",
+                package_name,
+                "--upgrade",
+                "-i",
+                index_url,
+                "--trusted-host",
+                trusted_host,
+                "--retries",
+                "2",
+                "--timeout",
+                "45",
+            ]
+        else:
+            print(f"[尝试] PyPI 官方源：{package_name}")
+            args = [
+                str(python_exe),
+                "-m",
+                "pip",
+                "install",
+                package_name,
+                "--upgrade",
+                "--retries",
+                "2",
+                "--timeout",
+                "45",
+            ]
+        if run_command(args, cwd=mcp_dir) == 0:
+            return True
+    return False
+
+
+def install_package_set(python_exe: Path, mcp_dir: Path, packages: tuple, required: bool) -> bool:
+    ok = True
+    for item in packages:
+        package_name, module_name = item[0], item[1]
+        feature = item[2] if len(item) > 2 else ""
+        if module_import_ok(python_exe, module_name):
+            print(f"[OK] {package_name} 已可用")
+            continue
+
+        label = "[安装]" if required else "[可选]"
+        suffix = f"（{feature}）" if feature else ""
+        print(f"{label} {package_name}{suffix}")
+        installed = pip_install_package(python_exe, mcp_dir, package_name)
+        if installed and module_import_ok(python_exe, module_name):
+            print(f"[OK] {package_name} 安装完成")
+            continue
+
+        if required:
+            print(f"[ERROR] 核心依赖安装失败：{package_name}")
+            ok = False
+        else:
+            print(f"[提示] 可选依赖未安装：{package_name}，相关功能可能受限。")
+    return ok
+
+
+def install_dependencies(argv: list[str]) -> int:
+    mcp_dir = Path(normalize_user_path(argv[1])) if len(argv) >= 2 else Path(__file__).resolve().parent
+    mcp_dir = mcp_dir.resolve()
+    config_path = mcp_dir / "config.json"
+
+    print("============================================")
+    print("  ReaperAI v1.0.4 - 中文依赖安装器")
+    print("============================================")
+    print()
+    print("本步骤会准备 ReaperAI 私有 Python 环境、核心依赖和 FFmpeg。")
+    print("不会把 Python 写入系统 PATH，也不会修改系统全局环境。")
+    print()
+
+    python_exe = prepare_install_python(mcp_dir)
+    print(f"[OK] Python：{python_exe}")
+    print(f"[OK] Python 版本：{python_version_text(python_exe)}")
+    print()
+
+    expand_local_wheels(mcp_dir, python_exe)
+    print("[检查] 核心依赖")
+    core_ok = install_package_set(python_exe, mcp_dir, CORE_PACKAGES, required=True)
+    if not core_ok:
+        print()
+        print("[ERROR] 核心依赖没有安装完整，ReaperAI 暂时无法启动 MCP 服务。")
+        print("离线兜底：请把 requests、flask、flask-cors 及其依赖的 .whl 文件放入：")
+        print(f"  {mcp_dir / 'wheels'}")
+        print("然后重新运行【第一步】安装依赖.bat。")
+        return 1
+
+    print()
+    if _is_truthy_env("REAPERAI_SKIP_OPTIONAL"):
+        print("[跳过] 已设置 REAPERAI_SKIP_OPTIONAL=1，不安装可选依赖。")
+    else:
+        print("[检查] 可选依赖")
+        install_package_set(python_exe, mcp_dir, OPTIONAL_PACKAGES, required=False)
+
+    print()
+    if _is_truthy_env("REAPERAI_SKIP_FFMPEG"):
+        print("[跳过] 已设置 REAPERAI_SKIP_FFMPEG=1，不检查 FFmpeg。")
+    else:
+        print("[检查] FFmpeg")
+        if ensure_ffmpeg(["ensure_ffmpeg", str(mcp_dir), str(config_path)]) != 0:
+            print()
+            print("[ERROR] FFmpeg 未就绪。ElevenLabs 音频生成后的转换/导入会失败。")
+            return 1
+
+    print()
+    print("============================================")
+    print("  安装完成")
+    print("============================================")
+    print("[OK] HTTP Worker：ready")
+    print("[OK] MCP Server：ready")
+    print("如果 REAPER 已经打开，请重新启动 ReaperAI 后再测试。")
+    return 0
+
+
 def _ask(prompt: str, default: str = "") -> str:
     suffix = f"（默认：{default}）" if default else ""
     try:
@@ -608,6 +955,8 @@ def main() -> int:
             return set_ffmpeg_path(argv)
         if command == "ensure_ffmpeg":
             return ensure_ffmpeg(argv)
+        if command == "install_dependencies":
+            return install_dependencies(argv)
         return _die(f"Unknown command: {command}")
     except Exception as exc:
         _log_exception(exc)
