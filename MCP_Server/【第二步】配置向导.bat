@@ -26,6 +26,11 @@ set "PYTHONIOENCODING=utf-8"
 set "REAPERAI_CONFIG_WIZARD_LOG=%LOG_FILE%"
 
 if /i "%~1"=="--self-test" (
+  call :ensure_writable
+  if errorlevel 1 (
+    echo SELF_TEST_WRITE_FAILED
+    exit /b 1
+  )
   echo SELF_TEST_OK
   exit /b 0
 )
@@ -41,6 +46,17 @@ if not exist "%HELPER%" (
   echo [ERROR] Missing helper:
   echo        %HELPER%
   echo Please restore the full ReaperAI package.
+  pause
+  exit /b 1
+)
+
+call :ensure_writable
+if errorlevel 1 (
+  echo.
+  echo [ERROR] MCP_Server directory is not writable:
+  echo         "%SCRIPT_ROOT%"
+  echo Move ReaperAI to a writable directory, or run this BAT as administrator.
+  echo Detail log: %LOG_FILE%
   pause
   exit /b 1
 )
@@ -68,6 +84,16 @@ if not "%WIZARD_EXIT%"=="0" (
 )
 
 pause
+exit /b 0
+
+:ensure_writable
+set "WRITE_TEST=%SCRIPT_DIR%.reaperai_write_test_%RANDOM%_%RANDOM%.tmp"
+>"%WRITE_TEST%" echo write-test 2>nul
+if not exist "%WRITE_TEST%" (
+  >"%LOG_FILE%" echo MCP_Server directory is not writable: "%SCRIPT_ROOT%"
+  exit /b 1
+)
+del /f /q "%WRITE_TEST%" >nul 2>nul
 exit /b 0
 
 :ensure_python

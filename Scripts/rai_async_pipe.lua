@@ -8,7 +8,53 @@
 -- v1.0 修改：支持多个并发请求
 local AsyncPipe = {
   pending_requests = {},  -- 改为数组，支持多个并发请求
+  script_dir = nil,
 }
+
+function AsyncPipe.configure(options)
+  options = type(options) == "table" and options or {}
+  local script_dir = tostring(options.script_dir or "")
+  if script_dir ~= "" then
+    local last = script_dir:sub(-1)
+    if last ~= "\\" and last ~= "/" then
+      script_dir = script_dir .. "\\"
+    end
+    AsyncPipe.script_dir = script_dir
+  end
+end
+
+local function worker_candidates()
+  local userprofile = os.getenv("USERPROFILE") or ""
+  local paths = {}
+
+  -- 主入口通过 reaper.get_action_context() 传入真实脚本目录，因此这里不依赖盘符或安装目录名。
+  if AsyncPipe.script_dir and AsyncPipe.script_dir ~= "" then
+    table.insert(paths, AsyncPipe.script_dir .. "..\\MCP_Server\\rai_http_worker_v2.py")
+    table.insert(paths, AsyncPipe.script_dir .. "MCP_Server\\rai_http_worker_v2.py")
+  end
+
+  -- 兼容标准资源目录安装和旧版默认位置。
+  local resource_scripts_dir = reaper.GetResourcePath() .. "\\Scripts\\"
+  table.insert(paths, resource_scripts_dir .. "..\\MCP_Server\\rai_http_worker_v2.py")
+  table.insert(paths, resource_scripts_dir .. "MCP_Server\\rai_http_worker_v2.py")
+  table.insert(paths, "C:\\Program Files\\REAPER\\MCP_Server\\rai_http_worker_v2.py")
+  if userprofile ~= "" then
+    table.insert(paths, userprofile .. "\\Documents\\REAPER\\MCP_Server\\rai_http_worker_v2.py")
+  end
+  return paths
+end
+
+function AsyncPipe.find_worker_path()
+  local paths = worker_candidates()
+  for _, path in ipairs(paths) do
+    local f = io.open(path, "r")
+    if f then
+      f:close()
+      return path, paths
+    end
+  end
+  return nil, paths
+end
 
 -- 生成唯一请求 ID
 local function generate_request_id()
@@ -481,32 +527,10 @@ function AsyncPipe.send_request(api_url, api_key, model, messages, on_complete, 
   end
   
   -- 自动查找 worker 路径
-  local userprofile = os.getenv("USERPROFILE") or ""
-  local worker_paths = {
-    -- 常见安装位置
-    "C:\\Program Files\\REAPER\\MCP_Server\\rai_http_worker_v2.py",
-  }
-  if userprofile ~= "" then
-    table.insert(worker_paths, userprofile .. "\\Documents\\REAPER\\MCP_Server\\rai_http_worker_v2.py")
-  end
-  
-  -- 也检查脚本所在目录的 MCP_Server 子目录
-  local script_dir = reaper.GetResourcePath() .. "\\Scripts"
-  table.insert(worker_paths, 1, script_dir .. "\\..\\MCP_Server\\rai_http_worker_v2.py")
-  table.insert(worker_paths, 1, script_dir .. "\\MCP_Server\\rai_http_worker_v2.py")
-  
-  local worker_path = nil
-  for _, path in ipairs(worker_paths) do
-    local f = io.open(path, "r")
-    if f then
-      f:close()
-      worker_path = path
-      break
-    end
-  end
+  local worker_path, worker_paths = AsyncPipe.find_worker_path()
   
   if not worker_path then
-    return nil, "找不到 rai_http_worker_v2.py，请确保 MCP_Server 文件夹已正确放置"
+    return nil, "找不到 rai_http_worker_v2.py。已检查：\n - " .. table.concat(worker_paths, "\n - ")
   end
   
   local worker_dir = worker_path:match("(.*)\\[^\\]+")

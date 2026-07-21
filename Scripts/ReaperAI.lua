@@ -130,6 +130,11 @@ if f then
   local ok, result = pcall(function() return dofile(async_module_path) end)
   if ok and result then
     AsyncPipe = result
+    if type(AsyncPipe.configure) == "function" then
+      AsyncPipe.configure({
+        script_dir = RAI_SCRIPT_DIR,
+      })
+    end
     -- reaper.ShowConsoleMsg("✓ 异步 HTTP 模块已加载\\n")
   else
     reaper.ShowConsoleMsg("⚠️ 异步 HTTP 模块加载失败: " .. tostring(result) .. "\\n")
