@@ -30,6 +30,11 @@ if /i "%~1"=="--self-test" (
     echo SELF_TEST_WRITE_FAILED
     exit /b 1
   )
+  call :self_test_tail
+  if errorlevel 1 (
+    echo SELF_TEST_LABEL_SCAN_FAILED
+    exit /b 1
+  )
   echo SELF_TEST_OK
   exit /b 0
 )
@@ -104,18 +109,30 @@ exit /b 0
 
 :ensure_python
 echo [CHECK] Preparing Python runtime...
-call :find_python_local
+call :find_python_bundled
 if defined PYTHON_EXE exit /b 0
 
-echo [INFO] Local Python was not found. Preparing bundled portable runtime.
+echo [INFO] Bundled Python was not found. Preparing bundled portable runtime.
 call :bootstrap_python
+call :find_python_bundled
+if defined PYTHON_EXE exit /b 0
+
+echo [INFO] Bundled runtime is not available. Trying an existing local Python environment.
 call :find_python_local
 if defined PYTHON_EXE exit /b 0
 
-echo [INFO] Bundled runtime is not available. Trying system Python as final fallback.
+echo [INFO] Local Python was not found. Trying system Python as final fallback.
 call :find_python_system
 if defined PYTHON_EXE exit /b 0
 exit /b 1
+
+:find_python_bundled
+set "PYTHON_EXE="
+set "PYTHONW_EXE="
+call :try_python_file "%RUNTIME_DIR%\python.exe"
+if defined PYTHON_EXE exit /b 0
+call :try_python_file "%SCRIPT_DIR%.python\python.exe"
+exit /b 0
 
 :find_python_local
 set "PYTHON_EXE="
@@ -127,10 +144,6 @@ if exist "%SCRIPT_DIR%python_path.txt" (
 )
 if defined PYTHON_EXE exit /b 0
 call :try_python_file "%SCRIPT_DIR%.venv\Scripts\python.exe"
-if defined PYTHON_EXE exit /b 0
-call :try_python_file "%RUNTIME_DIR%\python.exe"
-if defined PYTHON_EXE exit /b 0
-call :try_python_file "%SCRIPT_DIR%.python\python.exe"
 exit /b 0
 
 :find_python_system
@@ -188,7 +201,6 @@ for %%V in (314 313 312 311 310) do (
 exit /b 0
 
 :bootstrap_python
-if exist "%RUNTIME_DIR%\python.exe" exit /b 0
 if not exist "%INSTALLER_DIR%" mkdir "%INSTALLER_DIR%" 2>nul
 call :find_bundled_embed
 if not defined PY_EMBED_ZIP call :download_embed_python
@@ -337,3 +349,6 @@ exit /b 1
 :command_exists
 where "%~1" >nul 2>nul
 exit /b %errorlevel%
+
+:self_test_tail
+exit /b 0

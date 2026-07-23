@@ -1,0 +1,2 @@
+# Preserve Windows batch files as CRLF in clones and GitHub source archives.
+*.bat -text diff whitespace=cr-at-eol
