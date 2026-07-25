@@ -777,7 +777,7 @@ def install_dependencies(argv: list[str]) -> int:
     config_path = mcp_dir / "config.json"
 
     print("============================================")
-    print("  ReaperAI v1.0.5 - 中文依赖安装器")
+    print("  ReaperAI v1.0.6 - 中文依赖安装器")
     print("============================================")
     print()
     print("本步骤会准备 ReaperAI 私有 Python 环境、核心依赖和 FFmpeg。")
@@ -875,7 +875,7 @@ def run_wizard(argv: list[str]) -> int:
     config_path = mcp_dir / "config.json"
 
     print("============================================")
-    print("  ReaperAI v1.0.5 - 中文配置向导")
+    print("  ReaperAI v1.0.6 - 中文配置向导")
     print("============================================")
     print()
     print("这个向导会生成 ReaperAI 的 MCP 配置文件。")

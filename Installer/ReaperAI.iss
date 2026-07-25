@@ -1,5 +1,5 @@
 #define AppName "ReaperAI"
-#define AppVersion "1.0.5"
+#define AppVersion "1.0.6"
 
 #ifndef SourceRoot
   #define SourceRoot AddBackslash(SourcePath) + "build\package"
@@ -50,7 +50,7 @@ Source: "{#SourceRoot}\EULA.txt"; DestDir: "{app}"; Flags: ignoreversion skipifs
 Source: "{#SourceRoot}\安装说明.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Registry]
-Root: HKCU; Subkey: "Software\ReaperAI"; ValueType: string; ValueName: "ReaperRoot"; ValueData: "{code:GetSelectedReaperRoot}"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\ReaperAI"; ValueType: string; ValueName: "ReaperRoot"; ValueData: "{code:GetSelectedReaperRoot}"; Flags: uninsdeletevalue uninsdeletekeyifempty
 Root: HKCU; Subkey: "Software\ReaperAI"; ValueType: string; ValueName: "ResourceRoot"; ValueData: "{code:GetResourceRoot}"; Flags: uninsdeletevalue uninsdeletekeyifempty
 
 [Run]
@@ -64,6 +64,7 @@ var
   ReaperDirPage: TInputDirWizardPage;
   ResourceRoot: String;
   ReadyDetailsAdded: Boolean;
+  PreserveUserConfig: Boolean;
 
 function RemoveTrailingSlash(const Value: String): String;
 begin
@@ -419,20 +420,104 @@ begin
   end;
 end;
 
+function HasUninstallParameter(const ParameterName: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+  begin
+    if CompareText(ParamStr(I), ParameterName) = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+procedure RemoveUserConfiguration();
+var
+  ServerRoot: String;
+begin
+  if ResourceRoot = '' then
+    Exit;
+
+  ServerRoot := AddBackslash(ResourceRoot) + 'MCP_Server';
+  DeleteFile(AddBackslash(ResourceRoot) + 'ReaperAI_config.txt');
+  DeleteFile(AddBackslash(ResourceRoot) + 'ReaperAI_elevenlabs_voices.tsv');
+  DeleteFile(AddBackslash(ResourceRoot) + 'ReaperAI_doubao_voices.tsv');
+  DeleteFile(AddBackslash(ServerRoot) + 'config.json');
+  Log('Removed ReaperAI user configuration and voice caches.');
+end;
+
+procedure StopMcpServer();
+var
+  ServerRoot: String;
+  PythonwPath: String;
+  ShutdownScript: String;
+  ResultCode: Integer;
+begin
+  if ResourceRoot = '' then
+    Exit;
+
+  ServerRoot := AddBackslash(ResourceRoot) + 'MCP_Server';
+  PythonwPath := AddBackslash(ServerRoot) + 'python_runtime\pythonw.exe';
+  ShutdownScript := AddBackslash(ServerRoot) + 'shutdown_http_server.py';
+  if not FileExists(PythonwPath) or not FileExists(ShutdownScript) then
+    Exit;
+
+  if Exec(PythonwPath, '"' + ShutdownScript + '"', ServerRoot,
+    SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log('MCP shutdown helper exited with code ' + IntToStr(ResultCode))
+  else
+    Log('Could not start the MCP shutdown helper.');
+end;
+
 function InitializeUninstall(): Boolean;
+var
+  Choice: Integer;
 begin
   Result := True;
   if not RegQueryStringValue(HKCU, 'Software\ReaperAI', 'ResourceRoot', ResourceRoot) then
     ResourceRoot := '';
+
+  PreserveUserConfig := True;
+  if HasUninstallParameter('/DELETEUSERCONFIG') then
+  begin
+    PreserveUserConfig := False;
+    Log('Silent uninstall requested removal of user configuration.');
+  end
+  else if not UninstallSilent then
+  begin
+    Choice := SuppressibleMsgBox(
+      '是否保留 ReaperAI 用户配置？' + #13#10 + #13#10 +
+      '选择“是”：保留 API Key、模型、音频服务和 MCP 配置，重装后可继续使用。' + #13#10 +
+      '选择“否”：卸载时一并删除用户配置和音色缓存。',
+      mbConfirmation, MB_YESNO, IDYES);
+    PreserveUserConfig := Choice = IDYES;
+  end;
+
+  if PreserveUserConfig then
+    Log('Uninstall will preserve ReaperAI user configuration.')
+  else
+    Log('Uninstall will remove ReaperAI user configuration.');
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if (CurUninstallStep = usUninstall) and (ResourceRoot <> '') then
   begin
+    StopMcpServer();
     DeleteFile(AddBackslash(ResourceRoot) + 'MCP_Server\python_path.txt');
     DeleteFile(AddBackslash(ResourceRoot) + 'MCP_Server\pythonw_path.txt');
     DeleteFile(AddBackslash(ResourceRoot) + 'MCP_Server\ffmpeg_path.txt');
     RemoveRegisteredReaperAction();
+    if not PreserveUserConfig then
+      RemoveUserConfiguration();
+  end
+  else if (CurUninstallStep = usPostUninstall) and
+    (ResourceRoot <> '') and not PreserveUserConfig then
+  begin
+    DelTree(AddBackslash(ResourceRoot) + 'MCP_Server', True, True, True);
   end;
 end;

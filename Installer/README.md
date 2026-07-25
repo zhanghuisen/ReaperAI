@@ -25,6 +25,7 @@ resulting setup but should not be committed to the source repository.
 - `/REAPERDIR="C:\path\to\REAPER"` selects the folder containing `reaper.exe`.
 - `/RESOURCEDIR="C:\isolated\REAPER-resource"` overrides resource-path detection.
 - `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` performs an unattended install.
+- `/DELETEUSERCONFIG` removes ReaperAI user configuration during a silent uninstall. Silent uninstall preserves configuration by default.
 
 `/RESOURCEDIR` is intended for automated validation. Normal users only select
 their REAPER installation folder in the setup wizard.

@@ -964,7 +964,7 @@ function UI.render_audio(ctx)
   end
 
   local function render_doubao_voice_refresh()
-    label_text("音色检测")
+    label_text("在线音色目录")
     local refresh_disabled = state.audio_doubao_voices_refreshing == true
     if refresh_disabled and reaper.ImGui_BeginDisabled then reaper.ImGui_BeginDisabled(state.ctx, true) end
     if reaper.ImGui_Button(state.ctx, refresh_disabled and "刷新中##doubao_voice_refresh_config" or "刷新音色##doubao_voice_refresh_config", 104, 24) then
@@ -974,7 +974,7 @@ function UI.render_audio(ctx)
     reaper.ImGui_SameLine(state.ctx)
     local message = state.audio_doubao_voice_refresh_message
     if not message or message == "" then
-      message = "刷新后会缓存可用音色"
+      message = "从火山官方目录刷新并缓存 TTS 2.0 音色"
     end
     reaper.ImGui_TextColored(state.ctx, status_muted, message)
   end
@@ -1332,7 +1332,7 @@ function UI.render_audio(ctx)
     local voices = doubao_voice_options()
     local selected = selected_doubao_voice()
     local saved_id = tostring(config.doubao_speaker or state.audio_doubao_speaker or "")
-    local preview = "请先在服务商配置中刷新音色"
+    local preview = "请先在服务商配置中刷新在线音色目录"
     if selected then
       sync_doubao_settings_to_voice(selected)
       preview = doubao_voice_display_name(selected)
@@ -1351,7 +1351,7 @@ function UI.render_audio(ctx)
       if changed_filter then state.audio_doubao_voice_filter = new_filter end
 
       if #voices == 0 then
-        reaper.ImGui_TextColored(state.ctx, status_muted, "请在服务商配置中刷新可用音色")
+        reaper.ImGui_TextColored(state.ctx, status_muted, "请在服务商配置中刷新在线音色目录")
       end
 
       local visible = 0
@@ -1378,7 +1378,7 @@ function UI.render_audio(ctx)
     end
     reaper.ImGui_PopItemWidth(state.ctx)
     if saved_id ~= "" and not selected then
-      reaper.ImGui_TextColored(state.ctx, 0xFFAA00FF, "已保存音色不在当前列表，请刷新或重新选择")
+      reaper.ImGui_TextColored(state.ctx, 0xFFAA00FF, "已保存音色不在官方当前目录，请刷新或重新选择")
     end
   end
 
@@ -1929,7 +1929,7 @@ function UI.render(ctx)
   end
 
   local flags = reaper.ImGui_WindowFlags_MenuBar()
-  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.5 智能助手", true, flags)
+  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.6 智能助手", true, flags)
 
   local win_w, win_h = safe_window_size(state.ctx)
   local collapsed = safe_window_collapsed(state.ctx)

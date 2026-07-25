@@ -219,9 +219,21 @@ end
 
 local DOUBAO_LANGUAGE_OPTIONS = {
   { id = "zh_mix", label = "中英混" },
+  { id = "en", label = "英语" },
   { id = "ja", label = "日语" },
   { id = "id", label = "印尼语" },
   { id = "es", label = "西班牙语" },
+  { id = "pt", label = "葡萄牙语" },
+  { id = "th", label = "泰语" },
+  { id = "vi", label = "越南语" },
+  { id = "ru", label = "俄语" },
+  { id = "fr", label = "法语" },
+  { id = "ko", label = "韩语" },
+  { id = "tl", label = "菲律宾语" },
+  { id = "ar", label = "阿拉伯语" },
+  { id = "de", label = "德语" },
+  { id = "ms", label = "马来语" },
+  { id = "it", label = "意大利语" },
 }
 
 local DOUBAO_ACCENT_OPTIONS = {
@@ -262,7 +274,7 @@ end
 local function doubao_accent_options(language)
   language = trim_text(language)
   if language == "" then language = "zh_mix" end
-  local source = DOUBAO_ACCENT_OPTIONS[language] or DOUBAO_ACCENT_OPTIONS.zh_mix
+  local source = DOUBAO_ACCENT_OPTIONS[language] or { { id = "default", label = "默认" } }
   local out = {}
   for _, item in ipairs(source) do
     table.insert(out, { id = item.id, label = item.label })
@@ -290,9 +302,21 @@ local function normalize_doubao_language(language)
   if language == "" or language == "zh" or language == "zh-cn" or language == "cn" or language == "zh_cn" then
     return "zh_mix"
   end
+  if language == "english" or language == "en-us" or language == "en-gb" then return "en" end
   if language == "japanese" or language == "jp" then return "ja" end
   if language == "indonesian" or language == "in" then return "id" end
-  if language == "spanish" or language == "spa" then return "es" end
+  if language == "spanish" or language == "spa" or language == "mx" or language == "es-mx" then return "es" end
+  if language == "portuguese" or language == "pt-br" then return "pt" end
+  if language == "thai" then return "th" end
+  if language == "vietnamese" then return "vi" end
+  if language == "russian" then return "ru" end
+  if language == "french" then return "fr" end
+  if language == "korean" then return "ko" end
+  if language == "tagalog" or language == "filipino" or language == "fil" then return "tl" end
+  if language == "arabic" then return "ar" end
+  if language == "german" then return "de" end
+  if language == "malay" then return "ms" end
+  if language == "italian" then return "it" end
   for _, item in ipairs(DOUBAO_LANGUAGE_OPTIONS) do
     if item.id == language then return item.id end
   end

@@ -1,6 +1,6 @@
 # ReaperAI 手动安装（高级）
 
-普通用户应优先使用 GitHub Releases 中的 `ReaperAI-Setup-v1.0.5.exe`。本页仅用于开发、安装器调试或特殊环境排障。
+普通用户应优先使用 GitHub Releases 中的 `ReaperAI-Setup-v1.0.6.exe`。本页仅用于开发、安装器调试或特殊环境排障。
 
 ## 手动安装
 

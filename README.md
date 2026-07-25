@@ -1,4 +1,4 @@
-# ReaperAI v1.0.5
+# ReaperAI v1.0.6
 
 ReaperAI 是一个运行在 REAPER 里的 AI 助手。它可以把自然语言指令转换成可确认、可执行的 REAPER 操作，帮助音效师、音乐制作人和游戏音频设计师更快地完成轨道整理、素材处理、Region/Marker 管理、批量操作和音频生成相关工作。
 
@@ -15,17 +15,25 @@ ReaperAI 会先生成操作计划，你确认后再执行。默认不会直接�
 
 ## Windows 一键安装
 
-[下载 ReaperAI-Setup-v1.0.5.exe](https://github.com/zhanghuisen/ReaperAI/releases/download/v1.0.5/ReaperAI-Setup-v1.0.5.exe)
+[下载 ReaperAI-Setup-v1.0.6.exe](https://github.com/zhanghuisen/ReaperAI/releases/download/v1.0.6/ReaperAI-Setup-v1.0.6.exe)
 
 > 普通用户请下载上面的安装程序，不要点击 GitHub 的 `Code -> Download ZIP`。仓库 ZIP 是开发源码，不是安装包。
 
 1. 完全关闭 REAPER。
-2. 运行 `ReaperAI-Setup-v1.0.5.exe`。
+2. 运行 `ReaperAI-Setup-v1.0.6.exe`。
 3. 选择包含 `reaper.exe` 的 REAPER 根目录，支持任意盘符和带空格的自定义路径。
 4. 安装完成后启动 REAPER，在 Action List 中搜索并运行 `ReaperAI`。
 5. 在 ReaperAI 设置页填写 API Key，并点击“测试连接”。
 
 安装包已经内置 Python 3.11、Python 依赖、FFmpeg 和所需 REAPER 扩展。安装核心组件不需要联网；调用 LLM 或音频服务时仍需网络。如果 Windows 显示 SmartScreen 提示，可核对 Release 页面公布的 SHA256 后选择“更多信息 -> 仍要运行”。
+
+## v1.0.6 更新重点
+
+- 豆包音色大扩充：刷新按钮直接读取火山引擎官方公开的 TTS 2.0 音色目录，当前可发现 244 个音色，不再受旧版 13 个内置音色限制。
+- 扩展豆包多语种筛选，覆盖中文、英语、日语、印尼语、西班牙语、葡萄牙语、泰语、越南语、俄语、法语、韩语、菲律宾语、阿拉伯语、德语、马来语和意大利语。
+- 在线刷新成功后写入本地缓存；网络或官方页面异常时保留上次缓存，首次安装且无缓存时才显示 13 个离线兜底音色。
+- 音色目录刷新无需 AK/SK，也不要求用户手动维护音色 ID。
+- 卸载器会先询问是否保留用户配置，再确认是否卸载 ReaperAI；选择不保留时会同时清理配置、音色缓存和 MCP 运行残留。
 
 ## v1.0.5 更新重点
 

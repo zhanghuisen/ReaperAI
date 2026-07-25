@@ -1,11 +1,11 @@
 --[[
-  ReaperAI v1.0.5 - 智能助手
+  ReaperAI v1.0.6 - 智能助手
   
   作者：zhanghuisen
   
   前置要求：ReaImGui（通过 ReaPack 安装）
   
-  版本：1.0.5 (2026-07-11)
+  版本：1.0.6 (2026-07-26)
   核心特性：
   - 异步 HTTP：使用后台 worker，不阻塞 REAPER UI
   - 智能助手：支持咨询与操作双模式
@@ -839,7 +839,7 @@ local function save_config()
   end
 
   f:write(table.concat({
-    "# ReaperAI v1.0.5 配置文件",
+    "# ReaperAI v1.0.6 配置文件",
     "# 格式: KEY=VALUE",
     "# 现在推荐在 ReaperAI 设置面板中编辑，文件仅作为本地存储。",
     "# 支持配置项: LLM_PROVIDER, LLM_API_KEY, LLM_API_URL, LLM_MODEL, LLM_RECENT_MODELS, AUDIO_PROVIDER, ELEVENLABS_API_KEY, DOUBAO_API_KEY, DOUBAO_SPEAKER",
@@ -1186,6 +1186,8 @@ function DoubaoVoiceSettings.parse_worker_response(response)
   return voices, {
     message = json_string_field(response, "message") or "",
     content = content,
+    fallback = json_bool_field(response, "fallback") == true,
+    cacheable = json_bool_field(response, "cacheable") ~= false,
   }
 end
 
@@ -1201,42 +1203,49 @@ function DoubaoVoiceSettings.load_cache()
     state.audio_doubao_speaker = CONFIG.doubao_speaker
     state.audio_doubao_voice_id = CONFIG.doubao_speaker
   end
-  state.audio_doubao_voice_refresh_message = "已加载上次检测的 " .. tostring(#voices) .. " 条豆包音色"
+  state.audio_doubao_voice_refresh_message = "已加载上次缓存的 " .. tostring(#voices) .. " 个豆包音色"
   return true
 end
 
 function DoubaoVoiceSettings.refresh_voices()
   local doubao_api_key = CONFIG.doubao_api_key or ""
-  if doubao_api_key == "" then
-    state.audio_doubao_voice_refresh_message = "请先填写豆包 API Key"
-    state.status = state.audio_doubao_voice_refresh_message
-    return false, state.audio_doubao_voice_refresh_message
-  end
-
   if not AsyncPipe or type(AsyncPipe.fetch_doubao_voices) ~= "function" then
-    state.audio_doubao_dynamic_voices = {}
-    state.audio_doubao_voice_refresh_message = "异步模块未更新，无法检测豆包音色"
+    state.audio_doubao_voice_refresh_message = "异步模块未更新，无法刷新官方音色目录"
     state.status = state.audio_doubao_voice_refresh_message
     return false, state.audio_doubao_voice_refresh_message
   end
 
   state.audio_doubao_voices_refreshing = true
-  state.audio_doubao_voice_refresh_message = "正在刷新豆包可用音色"
+  state.audio_doubao_voice_refresh_message = "正在读取火山官方在线音色目录"
   state.status = state.audio_doubao_voice_refresh_message
 
   local req_id, err = AsyncPipe.fetch_doubao_voices(doubao_api_key, function(response, error)
     state.audio_doubao_voices_refreshing = false
     if error then
-      state.audio_doubao_dynamic_voices = {}
-      state.audio_doubao_voice_refresh_message = "豆包音色检测失败: " .. tostring(error)
+      local existing_count = #(state.audio_doubao_dynamic_voices or {})
+      state.audio_doubao_voice_refresh_message = "官方音色目录刷新失败: " .. tostring(error)
+      if existing_count > 0 then
+        state.audio_doubao_voice_refresh_message = state.audio_doubao_voice_refresh_message .. "；已保留现有 " .. tostring(existing_count) .. " 个音色"
+      end
       state.status = state.audio_doubao_voice_refresh_message
       return
     end
 
     local voices, meta = DoubaoVoiceSettings.parse_worker_response(response)
     if not voices then
-      state.audio_doubao_dynamic_voices = {}
-      state.audio_doubao_voice_refresh_message = "没有检测到可用豆包音色: " .. tostring(meta)
+      local existing_count = #(state.audio_doubao_dynamic_voices or {})
+      state.audio_doubao_voice_refresh_message = "官方音色目录解析失败: " .. tostring(meta)
+      if existing_count > 0 then
+        state.audio_doubao_voice_refresh_message = state.audio_doubao_voice_refresh_message .. "；已保留现有 " .. tostring(existing_count) .. " 个音色"
+      end
+      state.status = state.audio_doubao_voice_refresh_message
+      return
+    end
+
+    local existing_count = #(state.audio_doubao_dynamic_voices or {})
+    if meta and meta.fallback and existing_count > 0 then
+      local fallback_message = meta.message ~= "" and meta.message or "官方在线目录刷新失败"
+      state.audio_doubao_voice_refresh_message = fallback_message .. "；已保留现有 " .. tostring(existing_count) .. " 个音色"
       state.status = state.audio_doubao_voice_refresh_message
       return
     end
@@ -1248,9 +1257,9 @@ function DoubaoVoiceSettings.refresh_voices()
       state.audio_doubao_voice_id = CONFIG.doubao_speaker
     end
 
-    local message = "已检测到 " .. tostring(#voices) .. " 条豆包音色"
+    local message = "已从火山官方在线目录刷新 " .. tostring(#voices) .. " 个 TTS 2.0 音色"
     if meta and meta.message ~= "" then message = meta.message end
-    if meta and meta.content and meta.content ~= "" then
+    if meta and meta.cacheable and not meta.fallback and meta.content and meta.content ~= "" then
       write_audio_voice_cache("doubao", meta.content)
     end
     state.audio_doubao_voice_refresh_message = message
@@ -1259,8 +1268,11 @@ function DoubaoVoiceSettings.refresh_voices()
 
   if not req_id then
     state.audio_doubao_voices_refreshing = false
-    state.audio_doubao_dynamic_voices = {}
-    state.audio_doubao_voice_refresh_message = "豆包音色检测启动失败: " .. tostring(err)
+    local existing_count = #(state.audio_doubao_dynamic_voices or {})
+    state.audio_doubao_voice_refresh_message = "官方音色目录刷新启动失败: " .. tostring(err)
+    if existing_count > 0 then
+      state.audio_doubao_voice_refresh_message = state.audio_doubao_voice_refresh_message .. "；已保留现有 " .. tostring(existing_count) .. " 个音色"
+    end
     state.status = state.audio_doubao_voice_refresh_message
     return false, state.audio_doubao_voice_refresh_message
   end
@@ -1348,7 +1360,7 @@ end
 local function init()
   if state.ctx then return true end
   if not reaper.ImGui_CreateContext then
-    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.5", 0)
+    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.6", 0)
     return false
   end
   state.ctx = reaper.ImGui_CreateContext("ReaperAI")

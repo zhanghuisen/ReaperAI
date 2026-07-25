@@ -28,6 +28,7 @@ import shutil
 import re
 import base64
 import uuid
+import html
 
 RESPONSE_TIMEOUT = 90  # 秒
 TEMP_DIR = os.environ.get('TEMP', 'C:\\Temp')
@@ -84,6 +85,9 @@ DOUBAO_TTS_RESOURCE_ID = "seed-tts-2.0"
 DOUBAO_CLONE_RESOURCE_ID = "seed-icl-2.0"
 DOUBAO_TTS_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
 DOUBAO_AUDIO_ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/create"
+DOUBAO_VOICE_CATALOG_URL = "https://docs.volcengine.com/docs/6561/1257544"
+DOUBAO_VOICE_CATALOG_LOADER = "docs/(libid)/(docid$)/page"
+DOUBAO_VOICE_CATALOG_MIN_COUNT = 20
 
 DOUBAO_BUILTIN_VOICES = [
     {
@@ -1339,12 +1343,36 @@ def _normalize_doubao_language_tag(value):
     value = str(value or "").strip().lower().replace("_", "-")
     if value in ("zh", "zh-cn", "zh-hans", "cn", "chinese", "mandarin", "putonghua", "zhmix", "zh-mix"):
         return "zh_mix"
+    if value in ("en", "en-us", "en-gb", "english", "american-english", "british-english"):
+        return "en"
     if value in ("ja", "jp", "japanese", "ja-jp"):
         return "ja"
     if value in ("id", "in", "indonesian", "id-id", "indo"):
         return "id"
-    if value in ("es", "es-mx", "spanish", "spa", "mx"):
+    if value in ("es", "es-es", "es-mx", "spanish", "spa", "mx"):
         return "es"
+    if value in ("pt", "pt-br", "portuguese", "brazilian-portuguese"):
+        return "pt"
+    if value in ("th", "th-th", "thai"):
+        return "th"
+    if value in ("vi", "vi-vn", "vietnamese"):
+        return "vi"
+    if value in ("ru", "ru-ru", "russian"):
+        return "ru"
+    if value in ("fr", "fr-fr", "french"):
+        return "fr"
+    if value in ("ko", "ko-kr", "korean"):
+        return "ko"
+    if value in ("tl", "fil", "fil-ph", "tagalog", "filipino"):
+        return "tl"
+    if value in ("ar", "arabic"):
+        return "ar"
+    if value in ("de", "de-de", "german"):
+        return "de"
+    if value in ("ms", "ms-my", "malay"):
+        return "ms"
+    if value in ("it", "it-it", "italian"):
+        return "it"
     return ""
 
 
@@ -1374,13 +1402,27 @@ def _unique_nonempty(values):
 
 def _infer_doubao_languages_from_id(voice_id):
     lower = str(voice_id or "").lower()
-    if lower.startswith("ja_") or "_ja_" in lower:
-        return ["ja"]
-    if lower.startswith("id_") or "_id_" in lower:
-        return ["id"]
-    if lower.startswith("es_") or "_es_" in lower:
-        return ["es"]
-    return ["zh_mix"]
+    prefix = lower.split("_", 1)[0]
+    language = {
+        "zh": "zh_mix",
+        "en": "en",
+        "ja": "ja",
+        "id": "id",
+        "es": "es",
+        "mx": "es",
+        "pt": "pt",
+        "th": "th",
+        "vi": "vi",
+        "ru": "ru",
+        "fr": "fr",
+        "ko": "ko",
+        "tl": "tl",
+        "ar": "ar",
+        "de": "de",
+        "ms": "ms",
+        "it": "it",
+    }.get(prefix)
+    return [language or "zh_mix"]
 
 
 def _doubao_resource_id_for_voice(voice_id, requested=""):
@@ -1474,6 +1516,210 @@ def _collect_doubao_voice_records(data):
 
     visit(data)
     return candidates
+
+
+def _split_markdown_table_row(line):
+    line = str(line or "").strip()
+    if not line.startswith("|"):
+        return []
+    if line.endswith("\\"):
+        line = line[:-1].rstrip()
+    body = line[1:-1] if line.endswith("|") else line[1:]
+    cells = []
+    current = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == "\\" and index + 1 < len(body) and body[index + 1] == "|":
+            current.append("|")
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    cells.append("".join(current))
+    return cells
+
+
+def _clean_catalog_cell(value):
+    value = str(value or "")
+    value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", value)
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = value.replace("**", "").replace("__", "")
+    value = re.sub(r"\\([\\`*_{}\[\]()#+.!|-])", r"\1", value)
+    return re.sub(r"\s+", " ", html.unescape(value)).strip()
+
+
+def _append_catalog_cell(record, key, value):
+    value = _clean_catalog_cell(value)
+    if not value:
+        return
+    previous = str(record.get(key) or "").strip()
+    if not previous:
+        record[key] = value
+    elif value not in previous:
+        record[key] = f"{previous} {value}"
+
+
+def _catalog_tag_items(value):
+    return _unique_nonempty(
+        _clean_catalog_cell(item)
+        for item in re.split(r"[,，、;/]+", str(value or ""))
+    )
+
+
+def _catalog_language_tags(language_text, voice_id):
+    language_text = _clean_catalog_cell(language_text).lower()
+    keyword_map = (
+        (("墨西哥西班牙语", "墨西哥西语"), "es"),
+        (("巴西葡萄牙语", "葡萄牙语"), "pt"),
+        (("英式英语", "美式英语", "英语", "english"), "en"),
+        (("中文", "普通话", "chinese"), "zh_mix"),
+        (("日文", "日语", "japanese"), "ja"),
+        (("印尼", "indonesian"), "id"),
+        (("西班牙语", "spanish"), "es"),
+        (("泰语", "thai"), "th"),
+        (("越南语", "vietnamese"), "vi"),
+        (("俄语", "russian"), "ru"),
+        (("法语", "french"), "fr"),
+        (("韩语", "korean"), "ko"),
+        (("菲律宾语", "tagalog", "filipino"), "tl"),
+        (("阿拉伯语", "arabic"), "ar"),
+        (("德语", "german"), "de"),
+        (("马来语", "malay"), "ms"),
+        (("意大利语", "italian"), "it"),
+    )
+    languages = []
+    for keywords, language in keyword_map:
+        if any(keyword in language_text for keyword in keywords):
+            languages.append(language)
+    return _unique_nonempty(languages or _infer_doubao_languages_from_id(voice_id))
+
+
+def _catalog_accent_tags(language_text):
+    text = _clean_catalog_cell(language_text).lower()
+    accents = ["default"]
+    if "东北" in text:
+        accents.append("dongbei")
+    if "陕西" in text or "陕北" in text:
+        accents.append("shaanxi")
+    if "四川" in text or "川普" in text:
+        accents.append("sichuan")
+    return _unique_nonempty(accents)
+
+
+def _doubao_catalog_record(raw):
+    voice_id = str(raw.get("id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*_bigtts", voice_id):
+        return None
+    language_text = raw.get("language") or ""
+    languages = _catalog_language_tags(language_text, voice_id)
+    accents = _catalog_accent_tags(language_text)
+    tags = ["catalog:official", "model:tts-2.0"]
+    gender = _infer_gender_from_text(voice_id)
+    if gender:
+        tags.append(gender)
+    for language in languages:
+        tags.append(f"lang:{language}")
+    for accent in accents:
+        tags.append(f"accent:{accent}")
+    for item in _catalog_tag_items(raw.get("scene")):
+        tags.append(f"scene:{item}")
+    for item in _catalog_tag_items(raw.get("capability")):
+        tags.append(f"ability:{item}")
+    for item in _catalog_tag_items(raw.get("special")):
+        tags.append(f"label:{item}")
+    tags.extend(DOUBAO_CONTROL_TAGS)
+    tags.append(f"resource:{DOUBAO_TTS_RESOURCE_ID}")
+    return {
+        "id": voice_id,
+        "name": _clean_catalog_cell(raw.get("name")) or voice_id,
+        "language": languages[0] if len(languages) == 1 else "",
+        "accent": accents[0] if len(accents) == 1 else "",
+        "source": "official-online",
+        "available": True,
+        "tags": _unique_nonempty(tags),
+    }
+
+
+def _parse_doubao_official_catalog(content):
+    records = []
+    seen = set()
+    current = None
+    in_tts2_section = False
+
+    def finish_current():
+        nonlocal current
+        record = _doubao_catalog_record(current or {})
+        current = None
+        if record and record["id"] not in seen:
+            seen.add(record["id"])
+            records.append(record)
+
+    for raw_line in str(content or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            finish_current()
+            heading = _clean_catalog_cell(line[3:])
+            in_tts2_section = "豆包语音合成模型2.0" in heading and "音色列表" in heading
+            continue
+        if not in_tts2_section:
+            continue
+        cells = _split_markdown_table_row(line)
+        if len(cells) < 3:
+            continue
+        cells.extend([""] * (6 - len(cells)))
+        cells = [_clean_catalog_cell(value) for value in cells[:6]]
+        voice_id = cells[2]
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*_bigtts", voice_id):
+            finish_current()
+            current = {
+                "scene": cells[0],
+                "name": cells[1],
+                "id": voice_id,
+                "language": cells[3],
+                "capability": cells[4],
+                "special": cells[5],
+            }
+        elif current and not any(cells[:3]):
+            _append_catalog_cell(current, "language", cells[3])
+            _append_catalog_cell(current, "capability", cells[4])
+            _append_catalog_cell(current, "special", cells[5])
+
+    finish_current()
+    return records
+
+
+def _fetch_doubao_official_catalog():
+    response = requests.get(
+        DOUBAO_VOICE_CATALOG_URL,
+        params={
+            "lang": "zh",
+            "__loader": DOUBAO_VOICE_CATALOG_LOADER,
+            "__ssrDirect": "true",
+        },
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "ReaperAI/1.0.6",
+        },
+        timeout=VOICE_LIST_TIMEOUT,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"官方目录返回 HTTP {response.status_code}")
+    data = _response_json_if_any(response)
+    if not isinstance(data, dict):
+        raise RuntimeError("官方目录响应不是 JSON 对象")
+    document = data.get("curDoc")
+    if not isinstance(document, dict):
+        raise RuntimeError("官方目录响应缺少 curDoc")
+    content = document.get("Content") or document.get("MDContent") or ""
+    records = _parse_doubao_official_catalog(content)
+    if len(records) < DOUBAO_VOICE_CATALOG_MIN_COUNT:
+        raise RuntimeError(f"官方目录只解析到 {len(records)} 条 TTS 2.0 音色")
+    return records, str(document.get("UpdatedTime") or "").strip()
 
 
 def _labels_text(labels):
@@ -2245,63 +2491,39 @@ def make_doubao_audio_request(api_key, audio_req, output_dir=None):
 
 
 def make_doubao_voices_request(api_key):
-    if not api_key:
-        return {"success": False, "error": "请先填写豆包 API Key"}
-
-    collected = []
-    seen_ids = set()
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "X-Api-Key": api_key,
-    }
-    candidate_urls = [
-        "https://openspeech.bytedance.com/api/v3/tts/speakers",
-        "https://openspeech.bytedance.com/api/v3/tts/list_speakers",
-    ]
-
-    for url in candidate_urls:
-        try:
-            response = requests.get(url, headers=headers, timeout=VOICE_LIST_TIMEOUT)
-        except Exception:
-            continue
-        if response.status_code != 200:
-            continue
-        data = _response_json_if_any(response)
-        if not isinstance(data, (dict, list)):
-            continue
-        for record in _collect_doubao_voice_records(data):
-            if not record or not record.get("available"):
-                continue
-            if record["id"] in seen_ids:
-                continue
-            seen_ids.add(record["id"])
-            collected.append(record)
-
-    for voice in DOUBAO_BUILTIN_VOICES:
-        tags = _unique_nonempty(list(voice.get("tags") or []) + list(DOUBAO_CONTROL_TAGS) + [f"resource:{DOUBAO_TTS_RESOURCE_ID}"])
-        record = {
-            "id": voice.get("id") or "",
-            "name": voice.get("name") or voice.get("id") or "",
-            "language": "",
-            "accent": "",
-            "source": "official",
-            "available": True,
-            "tags": tags,
+    del api_key  # 官方公开音色目录无需豆包 API Key。
+    try:
+        collected, updated_time = _fetch_doubao_official_catalog()
+    except Exception as exc:
+        collected = []
+        for voice in DOUBAO_BUILTIN_VOICES:
+            tags = _unique_nonempty(list(voice.get("tags") or []) + list(DOUBAO_CONTROL_TAGS) + [f"resource:{DOUBAO_TTS_RESOURCE_ID}"])
+            collected.append({
+                "id": voice.get("id") or "",
+                "name": voice.get("name") or voice.get("id") or "",
+                "language": "",
+                "accent": "",
+                "source": "offline-fallback",
+                "available": True,
+                "tags": tags,
+            })
+        return {
+            "success": True,
+            "fallback": True,
+            "cacheable": False,
+            "content": "\n".join(_doubao_voice_record_line(record) for record in collected),
+            "count": len(collected),
+            "message": f"官方在线目录刷新失败，显示 {len(collected)} 个离线兜底音色：{exc}",
         }
-        if record["id"] and record["id"] not in seen_ids:
-            seen_ids.add(record["id"])
-            collected.append(record)
 
-    if not collected:
-        return {"success": False, "error": "没有可用豆包音色"}
-
-    source_note = "，已包含官方常用音色"
     return {
         "success": True,
+        "fallback": False,
+        "cacheable": True,
         "content": "\n".join(_doubao_voice_record_line(record) for record in collected),
         "count": len(collected),
-        "message": f"已刷新 {len(collected)} 条豆包音色{source_note}",
+        "updated_time": updated_time,
+        "message": f"已从火山官方在线目录刷新 {len(collected)} 个 TTS 2.0 音色",
     }
 
 
