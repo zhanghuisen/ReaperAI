@@ -4,6 +4,7 @@
 """
 import wave
 import struct
+import os
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -131,6 +132,9 @@ class LoopPointAnalyzer:
     def _load_with_pydub(self) -> bool:
         """使用 pydub 作为备选加载方式"""
         try:
+            ffmpeg_bin = Path(__file__).resolve().parents[2] / "ffmpeg" / "bin"
+            if (ffmpeg_bin / "ffmpeg.exe").exists():
+                os.environ["PATH"] = str(ffmpeg_bin) + os.pathsep + os.environ.get("PATH", "")
             from pydub import AudioSegment
             audio = AudioSegment.from_file(str(self.file_path))
             self.sample_rate = audio.frame_rate

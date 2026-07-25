@@ -13,6 +13,20 @@ ReaperAI 是一个运行在 REAPER 里的 AI 助手。它可以把自然语言�
 
 ReaperAI 会先生成操作计划，你确认后再执行。默认不会直接改动工程。
 
+## Windows 一键安装
+
+[下载 ReaperAI-Setup-v1.0.5.exe](https://github.com/zhanghuisen/ReaperAI/releases/download/v1.0.5/ReaperAI-Setup-v1.0.5.exe)
+
+> 普通用户请下载上面的安装程序，不要点击 GitHub 的 `Code -> Download ZIP`。仓库 ZIP 是开发源码，不是安装包。
+
+1. 完全关闭 REAPER。
+2. 运行 `ReaperAI-Setup-v1.0.5.exe`。
+3. 选择包含 `reaper.exe` 的 REAPER 根目录，支持任意盘符和带空格的自定义路径。
+4. 安装完成后启动 REAPER，在 Action List 中搜索并运行 `ReaperAI`。
+5. 在 ReaperAI 设置页填写 API Key，并点击“测试连接”。
+
+安装包已经内置 Python 3.11、Python 依赖、FFmpeg 和所需 REAPER 扩展。安装核心组件不需要联网；调用 LLM 或音频服务时仍需网络。如果 Windows 显示 SmartScreen 提示，可核对 Release 页面公布的 SHA256 后选择“更多信息 -> 仍要运行”。
+
 ## v1.0.5 更新重点
 
 - 接入火山引擎/豆包语音：生成音频页支持服务商下拉选择，ElevenLabs 与火山引擎配置收进独立配置面板，界面不再把所有 API 项堆在设置页。
@@ -57,13 +71,14 @@ ReaperAI 会先生成操作计划，你确认后再执行。默认不会直接�
 - 一个可用的 LLM API Key
 - 网络可访问你选择的 LLM 服务
 
-不要求用户提前安装 Python。项目自带安装脚本会优先准备 ReaperAI 私有 Python 环境，并使用随包 wheels 离线安装核心依赖。
+不要求用户提前安装 Python。Windows 安装包已经内置 ReaperAI 私有 Python 环境和全部运行依赖。
 
 ## 项目结构
 
 ```text
 ReaperV1.0/
-├── MCP_Server/                 本地 MCP 服务、LLM Worker、安装脚本
+├── Installer/                  Windows 安装器源码和构建脚本
+├── MCP_Server/                 本地 MCP 服务与 LLM Worker
 ├── Scripts/
 │   ├── ReaperAI.lua            REAPER 入口脚本
 │   ├── rai_async_pipe.lua      异步请求管道
@@ -74,17 +89,11 @@ ReaperV1.0/
 └── 安装说明.txt
 ```
 
-## 安装
+## 开发者与手动安装
 
-1. 下载本项目。
-2. 将 `MCP_Server`、`Scripts`、`UserPlugins` 三个文件夹复制到你的 REAPER 根目录，例如 `X:\REAPER`。
-3. 进入 `MCP_Server` 文件夹，双击运行 `【第一步】安装依赖.bat`。
-4. 继续双击运行 `【第二步】配置向导.bat`，按提示完成配置。
-5. 打开 REAPER，按 `?` 打开 Action List。
-6. 点击 `Load`，选择 `X:\REAPER\Scripts\ReaperAI.lua`。
-7. 运行 `ReaperAI.lua`。
+仓库中的目录和 GitHub 自动生成的 Source code 压缩包用于开发、审查和重新构建安装器。普通用户应使用 Release 中的 EXE。
 
-如果你的 REAPER 不在 `X:\REAPER`，请按自己的实际路径选择脚本。
+只有在调试安装器或进行开发时，才需要参考[手动安装说明](docs/manual-install.md)。
 
 ## 首次配置
 
@@ -185,10 +194,11 @@ ReaperAI 尽量把执行风险显式化：
 
 如果你需要 MCP 增强能力，请检查：
 
-- 是否运行过 `【第一步】安装依赖.bat`
-- `MCP_Server` 是否位于 REAPER 根目录
+- 安装器是否完整执行成功
+- 在 REAPER 中打开资源目录后，是否存在 `MCP_Server` 文件夹
+- `MCP_Server\python_runtime\python.exe` 是否存在
 - 端口 `8765` 是否被其他程序占用
-- 杀毒软件是否拦截本地 Python 或 bat 脚本
+- 杀毒软件是否拦截安装包内置的 Python
 
 ### 本机能力检测失败
 

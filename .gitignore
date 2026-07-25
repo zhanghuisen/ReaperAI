@@ -21,6 +21,12 @@ MCP_Server/mcp_server_shutdown.json
 MCP_Server/*.tmp
 MCP_Server/*.bak
 
+# Windows installer build and validation artifacts
+Installer/build/
+Installer/output/
+Installer/test/
+/ReaperAI-Setup.exe
+
 # User/local configuration backups
 *.local
 *.local.*

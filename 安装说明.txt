@@ -2,41 +2,43 @@
 ReaperAI v1.0.5 - 安装与使用说明
 ============================================
 
-【安装步骤】
+【推荐安装方式】
 
-1. 复制 MCP_Server 、Scripts、UserPlugins 文件夹到Reaper根目录（建议 X:\REAPER）
+1. 从 GitHub Releases 下载 ReaperAI-Setup-v1.0.5.exe。
+2. 完全关闭 REAPER，然后运行安装程序。
+3. 选择包含 reaper.exe 的 REAPER 根目录。
+   支持 C、D、F、S 等任意盘符，也支持带空格和括号的自定义路径。
+4. 安装完成后启动 REAPER，按 ? 打开 Action List。
+5. 搜索 ReaperAI 并运行。
 
-2. 打开MCP_Server文件夹双击运行【第一步】安装依赖.bat，等待安装完成
-   该脚本会自动准备 ReaperAI 私有 Python 环境；用户电脑没有 Python 也可以安装。
-
-3. 双击运行【第二步】配置向导.bat，按中文提示完成配置
-   路径支持正斜杠、反斜杠、带双引号和带空格路径；窗口不会因错误直接闪退。
-
-4. 在 REAPER 中按 ? 打开 Action List，载入指令选择 X:\REAPER\Scripts\ReaperAI.lua 并运行
+不要点击 GitHub 的 Code -> Download ZIP 进行安装；该压缩包是开发源码。
+用户不需要安装 Python，也不需要运行 BAT。安装包已经内置全部核心依赖和 FFmpeg。
 
 ============================================
 
-【使用步骤】
+【首次配置】
 
-1. 在 REAPER 中运行 ReaperAI 脚本（按 ? 搜索 ReaperAI）
+1. 在 ReaperAI 设置页选择 LLM Provider。
+2. 填写对应服务商的 API Key。
+3. 选择或输入模型名称。
+4. 点击“测试连接”，确认 API 可用后保存。
 
-2. 在设置页签设置好LLM的API Key，并下划到本机功能检测页签，点击下方检测按钮来检测本机Action ID和本机Reaper API
+============================================
 
-3. 在对话页点击“执行模式”
+【卸载】
 
-4. 不开启执行模式只能对话（问为什么、怎么做）
-    开启执行模式可通过发送文本命令操作Reaper
+在 Windows“设置 -> 应用 -> 已安装的应用”中找到 ReaperAI 并卸载。
+卸载会删除程序和内置运行依赖，但保留用户的 API 与 MCP 配置。
 
 ============================================
 
 【注意事项】
 
-• 不要求用户提前安装 Python。安装脚本会优先使用随包便携 Python，并从本地 wheels 离线安装核心依赖
-• 第二步配置向导会优先使用随包/本地 Python 运行 UTF-8 中文界面，减少乱码和环境差异问题
-• 确保端口 8765 未被占用
-• 首次使用必须配置 LLM API Key
-• 如需使用 ElevenLabs 语音/音效功能，在配置文件中取消注释 ELEVENLABS_API_KEY
+- 安装核心组件不需要联网，调用 LLM 或音频服务时需要网络。
+- 安装和卸载前请关闭 REAPER。
+- 默认 MCP 端口为 8765。
+- 如果 Windows 显示 SmartScreen 提示，请先核对 GitHub Release 公布的 SHA256。
 
-如有疑问，请联系GitHub: Zhanghuisen
+GitHub: https://github.com/zhanghuisen/ReaperAI
 
 ============================================
