@@ -1703,7 +1703,7 @@ def _fetch_doubao_official_catalog():
         },
         headers={
             "Accept": "application/json",
-            "User-Agent": "ReaperAI/1.0.6",
+            "User-Agent": "ReaperAI/1.0.7",
         },
         timeout=VOICE_LIST_TIMEOUT,
     )
@@ -2069,6 +2069,7 @@ def parse_audio_request_payload(raw_text):
                     "voice_style": voice_style,
                     "performance": performance,
                     "performance_prompt": performance_prompt,
+                    "voice_instruction": _trim_audio_text(data.get("voice_instruction") or data.get("context_text") or data.get("instruction") or ""),
                     "emotion": _trim_audio_text(data.get("emotion") or ""),
                     "intensity": data.get("intensity"),
                     "pace": _trim_audio_text(data.get("pace") or ""),
@@ -2114,6 +2115,7 @@ def parse_audio_request_payload(raw_text):
             "voice_style": voice_style,
             "performance": "",
             "performance_prompt": voice_style,
+            "voice_instruction": "",
             "emotion": "",
             "intensity": None,
             "pace": "",
@@ -2142,6 +2144,7 @@ def parse_audio_request_payload(raw_text):
         "voice_style": "",
         "performance": "",
         "performance_prompt": "",
+        "voice_instruction": "",
         "emotion": "",
         "intensity": None,
         "pace": "",
@@ -2351,9 +2354,29 @@ def _save_doubao_tts_response(response, output_path):
     return _save_doubao_response(response, output_path)
 
 
+_DOUBAO_VOICE_SHORTCUT_RE = re.compile(r"【([^【】\r\n]*)】")
+
+
+def _extract_doubao_voice_shortcuts(text):
+    instructions = []
+
+    def replace(match):
+        instruction = _trim_audio_text(match.group(1))
+        if instruction:
+            instructions.append(instruction)
+        return ""
+
+    spoken_text = _trim_audio_text(_DOUBAO_VOICE_SHORTCUT_RE.sub(replace, str(text or "")))
+    return spoken_text, instructions
+
+
 def _make_doubao_vox_request(api_key, audio_req, output_path, format_name, text_prompt, speaker):
     if not speaker:
         return {"success": False, "error": "请先选择豆包语音合成音色"}
+
+    spoken_text, shortcut_instructions = _extract_doubao_voice_shortcuts(text_prompt)
+    if not spoken_text:
+        return {"success": False, "error": "豆包语音合成台词在移除语音快捷指令后为空"}
 
     audio_params = {
         "format": format_name,
@@ -2370,6 +2393,13 @@ def _make_doubao_vox_request(api_key, audio_req, output_path, format_name, text_
     language = _trim_audio_text(audio_req.get("language") or "zh_mix")
     accent = _trim_audio_text(audio_req.get("accent") or "default")
     additions = {}
+    voice_instruction = _trim_audio_text(audio_req.get("voice_instruction") or "")
+    context_parts = []
+    for instruction in [voice_instruction] + shortcut_instructions:
+        if instruction and instruction not in context_parts:
+            context_parts.append(instruction)
+    if context_parts:
+        additions["context_texts"] = ["；".join(context_parts)]
     explicit_language = _doubao_explicit_language(language)
     explicit_dialect = _doubao_explicit_dialect(language, accent)
     if explicit_language:
@@ -2378,7 +2408,7 @@ def _make_doubao_vox_request(api_key, audio_req, output_path, format_name, text_
         additions["explicit_dialect"] = explicit_dialect
 
     req_params = {
-        "text": text_prompt,
+        "text": spoken_text,
         "speaker": speaker,
         "audio_params": audio_params,
     }
@@ -3221,6 +3251,7 @@ def main():
             if cancel_requested():
                 return
             prompt_preview = audio_req.get("text_prompt") or audio_req.get("prompt") or audio_req.get("spoken_text") or audio_req.get("source_text") or ""
+            voice_instruction = audio_req.get("voice_instruction") or ""
             speaker_label = audio_req.get("speaker_name") or audio_req.get("speaker") or ""
             language_label = audio_req.get("language") or ""
             accent_label = audio_req.get("accent") or ""
@@ -3230,6 +3261,7 @@ def main():
                 f"音色: {speaker_label}" if audio_req["mode"] == "vox" and speaker_label else "",
                 f"语言/口音: {language_label} / {accent_label}" if audio_req["mode"] == "vox" and language_label else "",
                 f"语速/音调/音量: {audio_req.get('speed_ratio') or 1.0} / {audio_req.get('pitch_ratio') or 1.0} / {audio_req.get('volume_ratio') or 1.0}" if audio_req["mode"] == "vox" else "",
+                f"语音指令: {voice_instruction}" if audio_req["mode"] == "vox" and voice_instruction else "",
                 f"提示: {prompt_preview}",
                 f"保存目录: {output_dir}",
             ])

@@ -897,6 +897,7 @@ function UI.render_audio(ctx)
     state.audio_sfx_track_name = ""
     state.audio_sfx_prompt = ""
     state.audio_vox_performance = ""
+    state.audio_doubao_voice_instruction = ""
     state.audio_vox_text = ""
     state.status = "音频输入已重置"
     state.audio_status = state.status
@@ -1451,6 +1452,14 @@ function UI.render_audio(ctx)
       reaper.ImGui_Spacing(state.ctx)
       render_doubao_language_controls()
       render_doubao_advanced_controls()
+
+      reaper.ImGui_Spacing(state.ctx)
+      local changed_instruction, new_instruction = audio_line(
+        "语音指令（仅支持 TTS 2.0 音色）",
+        "audio_doubao_voice_instruction",
+        state.audio_doubao_voice_instruction or ""
+      )
+      if changed_instruction then state.audio_doubao_voice_instruction = new_instruction end
     else
       label_text("性别")
       if colored_button("男##audio_vox_male", 56, 26, (state.audio_vox_gender == "male") and accent or soft_button) then
@@ -1500,6 +1509,7 @@ function UI.render_audio(ctx)
           resource_id = doubao_voice_resource_id(selected),
           performance = "",
           performance_prompt = "",
+          voice_instruction = state.audio_doubao_voice_instruction or "",
           spoken_text = state.audio_vox_text or "",
           format = "wav",
         })
@@ -1929,7 +1939,7 @@ function UI.render(ctx)
   end
 
   local flags = reaper.ImGui_WindowFlags_MenuBar()
-  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.6 智能助手", true, flags)
+  local visible, open = reaper.ImGui_Begin(state.ctx, "ReaperAI v1.0.7 智能助手", true, flags)
 
   local win_w, win_h = safe_window_size(state.ctx)
   local collapsed = safe_window_collapsed(state.ctx)

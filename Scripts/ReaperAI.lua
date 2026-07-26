@@ -1,11 +1,11 @@
 --[[
-  ReaperAI v1.0.6 - 智能助手
+  ReaperAI v1.0.7 - 智能助手
   
   作者：zhanghuisen
   
   前置要求：ReaImGui（通过 ReaPack 安装）
   
-  版本：1.0.6 (2026-07-26)
+  版本：1.0.7 (2026-07-26)
   核心特性：
   - 异步 HTTP：使用后台 worker，不阻塞 REAPER UI
   - 智能助手：支持咨询与操作双模式
@@ -234,6 +234,7 @@ local state = {
   audio_vox_voices_refreshing = false,
   audio_vox_voice_refresh_message = "",
   audio_vox_performance = "",
+  audio_doubao_voice_instruction = "",
   audio_vox_text = "",
   audio_doubao_speaker = "",
   audio_doubao_language = "zh_mix",
@@ -839,7 +840,7 @@ local function save_config()
   end
 
   f:write(table.concat({
-    "# ReaperAI v1.0.6 配置文件",
+    "# ReaperAI v1.0.7 配置文件",
     "# 格式: KEY=VALUE",
     "# 现在推荐在 ReaperAI 设置面板中编辑，文件仅作为本地存储。",
     "# 支持配置项: LLM_PROVIDER, LLM_API_KEY, LLM_API_URL, LLM_MODEL, LLM_RECENT_MODELS, AUDIO_PROVIDER, ELEVENLABS_API_KEY, DOUBAO_API_KEY, DOUBAO_SPEAKER",
@@ -1360,7 +1361,7 @@ end
 local function init()
   if state.ctx then return true end
   if not reaper.ImGui_CreateContext then
-    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.6", 0)
+    reaper.ShowMessageBox("请安装 ReaImGui\\n（ReaPack → 搜索 ReaImGui → 安装）", "ReaperAI v1.0.7", 0)
     return false
   end
   state.ctx = reaper.ImGui_CreateContext("ReaperAI")

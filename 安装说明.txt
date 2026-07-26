@@ -1,10 +1,10 @@
 ============================================
-ReaperAI v1.0.6 - 安装与使用说明
+ReaperAI v1.0.7 - 安装与使用说明
 ============================================
 
 【推荐安装方式】
 
-1. 从 GitHub Releases 下载 ReaperAI-Setup-v1.0.6.exe。
+1. 从 GitHub Releases 下载 ReaperAI-Setup-v1.0.7.exe。
 2. 完全关闭 REAPER，然后运行安装程序。
 3. 选择包含 reaper.exe 的 REAPER 根目录。
    支持 C、D、F、S 等任意盘符，也支持带空格和括号的自定义路径。

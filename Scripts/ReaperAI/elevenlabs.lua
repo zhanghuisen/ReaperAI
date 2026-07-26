@@ -939,6 +939,7 @@ function ElevenLabs.normalize_request(input)
       req.voice_style = trim_text(req.voice_style or req.style or "")
       req.performance_prompt = trim_text(req.performance_prompt or req.performance or req.tone or "")
       req.performance = req.performance_prompt
+      req.voice_instruction = trim_text(req.voice_instruction or req.context_text or req.instruction or "")
       req.spoken_text = trim_text(req.spoken_text or req.text or req.prompt or req.description or "")
       req.text_prompt = trim_text(req.text_prompt or req.prompt or req.text or "")
       if req.text_prompt == "" and req.spoken_text ~= "" then
@@ -1000,6 +1001,7 @@ function ElevenLabs.request_json(req)
     ',"voice_style":', json_string(req.voice_style or ""),
     ',"performance":', json_string(req.performance or ""),
     ',"performance_prompt":', json_string(req.performance_prompt or req.performance or ""),
+    ',"voice_instruction":', json_string(req.voice_instruction or ""),
     ',"voice_id":', json_string(req.voice_id or ""),
     ',"spoken_text":', json_string(req.spoken_text or ""),
     ',"source_text":', json_string(req.source_text or ""),
@@ -1025,7 +1027,9 @@ function ElevenLabs.start_message(req)
       local speaker_label = speaker_name ~= "" and speaker_name or speaker
       local speaker_text = speaker_label ~= "" and ("声线: " .. speaker_label .. "\n") or ""
       local language_text = "语言: " .. doubao_language_label(req.language) .. " / " .. doubao_accent_label(req.language, req.accent) .. "\n"
-      return "正在用 " .. provider .. " 生成 VOX: " .. tostring(req.spoken_text or "") .. "\n" .. speaker_text .. language_text .. "提示: " .. tostring(req.text_prompt or "")
+      local instruction = trim_text(req.voice_instruction or "")
+      local instruction_text = instruction ~= "" and ("语音指令: " .. instruction .. "\n") or ""
+      return "正在用 " .. provider .. " 生成 VOX: " .. tostring(req.spoken_text or "") .. "\n" .. speaker_text .. language_text .. instruction_text .. "提示: " .. tostring(req.text_prompt or "")
     end
     return "正在用 " .. provider .. " 生成 VOX: " .. tostring(req.spoken_text or "") .. "\n声音: " .. style
   end

@@ -1,5 +1,5 @@
 #define AppName "ReaperAI"
-#define AppVersion "1.0.6"
+#define AppVersion "1.0.7"
 
 #ifndef SourceRoot
   #define SourceRoot AddBackslash(SourcePath) + "build\package"
@@ -65,6 +65,7 @@ var
   ResourceRoot: String;
   ReadyDetailsAdded: Boolean;
   PreserveUserConfig: Boolean;
+  PreservedMcpConfigPath: String;
 
 function RemoveTrailingSlash(const Value: String): String;
 begin
@@ -343,7 +344,7 @@ var
 begin
   PythonPath := AddBackslash(ResourceRoot) + 'MCP_Server\python_runtime\python.exe';
   if not Exec(PythonPath,
-    '-c "import requests, flask, flask_cors, numpy, soundfile, pydub, cffi"',
+    '-B -c "import requests, flask, flask_cors, numpy, soundfile, pydub, cffi"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
   begin
     RaiseException('Python 运行环境自检失败。请查看安装日志，错误代码：' + IntToStr(ResultCode));
@@ -450,6 +451,28 @@ begin
   Log('Removed ReaperAI user configuration and voice caches.');
 end;
 
+procedure BackupMcpConfiguration();
+var
+  ConfigPath: String;
+begin
+  PreservedMcpConfigPath := '';
+  if ResourceRoot = '' then
+    Exit;
+
+  ConfigPath := AddBackslash(ResourceRoot) + 'MCP_Server\config.json';
+  if not FileExists(ConfigPath) then
+    Exit;
+
+  PreservedMcpConfigPath := ExpandConstant('{tmp}\ReaperAI-config-preserve.json');
+  DeleteFile(PreservedMcpConfigPath);
+  if not CopyFile(ConfigPath, PreservedMcpConfigPath, False) then
+  begin
+    PreservedMcpConfigPath := '';
+    RaiseException('无法备份 MCP 配置文件：' + ConfigPath);
+  end;
+  Log('Backed up MCP configuration before uninstall.');
+end;
+
 procedure StopMcpServer();
 var
   ServerRoot: String;
@@ -498,12 +521,18 @@ begin
   end;
 
   if PreserveUserConfig then
-    Log('Uninstall will preserve ReaperAI user configuration.')
+  begin
+    Log('Uninstall will preserve ReaperAI user configuration.');
+    BackupMcpConfiguration();
+  end
   else
     Log('Uninstall will remove ReaperAI user configuration.');
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ServerRoot: String;
+  ConfigPath: String;
 begin
   if (CurUninstallStep = usUninstall) and (ResourceRoot <> '') then
   begin
@@ -515,9 +544,20 @@ begin
     if not PreserveUserConfig then
       RemoveUserConfiguration();
   end
-  else if (CurUninstallStep = usPostUninstall) and
-    (ResourceRoot <> '') and not PreserveUserConfig then
+  else if (CurUninstallStep = usPostUninstall) and (ResourceRoot <> '') then
   begin
-    DelTree(AddBackslash(ResourceRoot) + 'MCP_Server', True, True, True);
+    ServerRoot := AddBackslash(ResourceRoot) + 'MCP_Server';
+    DelTree(ServerRoot, True, True, True);
+    if PreserveUserConfig and (PreservedMcpConfigPath <> '') and
+      FileExists(PreservedMcpConfigPath) then
+    begin
+      if not ForceDirectories(ServerRoot) then
+        RaiseException('无法恢复 MCP 配置目录：' + ServerRoot);
+      ConfigPath := AddBackslash(ServerRoot) + 'config.json';
+      if not CopyFile(PreservedMcpConfigPath, ConfigPath, False) then
+        RaiseException('无法恢复 MCP 配置文件：' + ConfigPath);
+      DeleteFile(PreservedMcpConfigPath);
+      Log('Restored MCP configuration after uninstall cleanup.');
+    end;
   end;
 end;
